@@ -2,8 +2,8 @@ use std::ops::Add;
 use std::time::{Duration, SystemTime};
 
 use jsonwebtoken::{
-    decode, encode, errors::Error, Algorithm, DecodingKey, EncodingKey, Header, TokenData,
-    Validation,
+    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
+    errors::Error,
 };
 
 mod types;

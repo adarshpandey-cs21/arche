@@ -1,8 +1,8 @@
 use google_drive3::{
+    DriveHub,
     hyper_rustls::{self, HttpsConnector},
     hyper_util::{self, client::legacy::connect::HttpConnector},
     yup_oauth2::{self, ServiceAccountAuthenticator},
-    DriveHub,
 };
 
 pub type GCPDriveClient = DriveHub<HttpsConnector<HttpConnector>>;

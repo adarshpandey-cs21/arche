@@ -1,7 +1,6 @@
 use google_sheets4::{
-    hyper_rustls, hyper_util,
+    Sheets, hyper_rustls, hyper_util,
     yup_oauth2::{self, ServiceAccountAuthenticator},
-    Sheets,
 };
 
 pub type GCPSheetsClient =

@@ -1,5 +1,5 @@
 use aws_config::{BehaviorVersion, Region};
-use aws_sdk_s3::{config::Credentials, Client};
+use aws_sdk_s3::{Client, config::Credentials};
 
 pub async fn get_s3_client() -> Client {
     let region = Region::new("ap-south-1");

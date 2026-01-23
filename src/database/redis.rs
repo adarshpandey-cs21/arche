@@ -1,6 +1,6 @@
 use bb8::{Pool, PooledConnection};
-use bb8_redis::redis::AsyncCommands;
 use bb8_redis::RedisConnectionManager;
+use bb8_redis::redis::AsyncCommands;
 
 pub type RedisPool = bb8::Pool<bb8_redis::RedisConnectionManager>;
 
