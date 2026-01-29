@@ -38,6 +38,7 @@ version = "0.1.1"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
+ "aws-sdk-sesv2",
  "axum",
  "bb8",
  "bb8-redis",
@@ -52,6 +53,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "time",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -216,6 +218,29 @@ dependencies = [
  "sha2",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sesv2"
+version = "1.111.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "779d5c35e02584d8ab4dc91ea0ab9bec0a1405e1bd21d0ae8cd52a7aa6996ce9"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]

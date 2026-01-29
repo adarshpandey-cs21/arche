@@ -53,7 +53,7 @@ impl AppError {
     }
 
     // Helper for generating bad keys in the request
-    pub fn _unprocessable_entity(
+    pub fn unprocessable_entity(
         errors: Option<HashMap<String, String>>,
         message: Option<String>,
         description: Option<String>,
@@ -77,7 +77,7 @@ impl AppError {
         }
     }
 
-    pub fn _internal_error(error: String, message: Option<String>) -> Self {
+    pub fn internal_error(error: String, message: Option<String>) -> Self {
         Self::InternalError { error, message }
     }
 
