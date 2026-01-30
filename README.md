@@ -30,6 +30,8 @@ built on top of well-established libraries and SDKs.
 AWS SDK integrations built on official SDKs:
 
 - **S3**: Client initialization with support for IAM roles or environment-based credentials
+- **SES**: Email sending with SES, including templated emails
+- **KMS**: Key Management Service for encryption/decryption operations
 
 ### `gcp`
 
@@ -91,6 +93,30 @@ let client = get_s3_client().await;
 - `S3_CRED_SOURCE`: `"IAM"` (default) or `"env"` for environment-based credentials
 - `S3_ACCESS_KEY_ID`: Required when using `"env"` credential source
 - `S3_SECRET_ACCESS_KEY`: Required when using `"env"` credential source
+
+#### KMS
+
+Encrypt and decrypt data using AWS Key Management Service:
+
+```rust
+use arche::aws::kms::{get_kms_client, KMSClient};
+
+// Initialize with default region (ap-south-1)
+let client = get_kms_client().await;
+let kms = KMSClient::new(client);
+
+// Or with a specific region
+let kms = KMSClient::new_with_region("us-east-1").await;
+
+// Encrypt data
+let plaintext = b"sensitive data";
+let ciphertext = kms.encrypt("alias/my-key", plaintext).await?;
+
+// Decrypt data
+let decrypted = kms.decrypt(&ciphertext).await?;
+```
+
+**Credentials:** Uses IAM role credentials by default (recommended for EC2/ECS/Lambda).
 
 ### GCP (`arche::gcp`)
 
@@ -266,6 +292,8 @@ built on top of well-established libraries and SDKs.
 ### `aws`
 AWS SDK integrations built on official SDKs:
 - **S3**: Client initialization with support for IAM roles or environment-based credentials
+- **SES**: Email sending with SES, including templated emails
+- **KMS**: Key Management Service for encryption/decryption operations
 
 ### `gcp`
 Google Cloud Platform integrations:
@@ -316,6 +344,29 @@ let client = get_s3_client().await;
 - `S3_CRED_SOURCE`: `"IAM"` (default) or `"env"` for environment-based credentials
 - `S3_ACCESS_KEY_ID`: Required when using `"env"` credential source
 - `S3_SECRET_ACCESS_KEY`: Required when using `"env"` credential source
+
+#### KMS
+Encrypt and decrypt data using AWS Key Management Service:
+
+```rust
+use arche::aws::kms::{get_kms_client, KMSClient};
+
+// Initialize with default region (ap-south-1)
+let client = get_kms_client().await;
+let kms = KMSClient::new(client);
+
+// Or with a specific region
+let kms = KMSClient::new_with_region("us-east-1").await;
+
+// Encrypt data
+let plaintext = b"sensitive data";
+let ciphertext = kms.encrypt("alias/my-key", plaintext).await?;
+
+// Decrypt data
+let decrypted = kms.decrypt(&ciphertext).await?;
+```
+
+**Credentials:** Uses IAM role credentials by default (recommended for EC2/ECS/Lambda).
 
 ---
 
