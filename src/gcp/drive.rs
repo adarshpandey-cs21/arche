@@ -5,20 +5,26 @@ use google_drive3::{
     yup_oauth2::{self, ServiceAccountAuthenticator},
 };
 
+use crate::config::resolve_required_string;
+use crate::error::AppError;
+
+pub use crate::config::gcp::{GcpDriveConfig, GcpDriveConfigBuilder};
+
 pub type GCPDriveClient = DriveHub<HttpsConnector<HttpConnector>>;
 
 #[allow(dead_code)]
-pub async fn get_drive_client() -> Result<GCPDriveClient, String> {
-    let gcp_drive_key = std::env::var("GCP_DRIVE_KEY").map_err(|e| {
-        tracing::error!(
-            error = %e,
-            env_var = "GCP_DRIVE_KEY",
-            "Missing GCP Drive configuration"
-        );
-        format!("GCP_DRIVE_KEY not configured: {}", e)
-    })?;
+pub async fn get_drive_client(
+    config: impl Into<Option<GcpDriveConfig>>,
+) -> Result<GCPDriveClient, AppError> {
+    let config = config.into().unwrap_or_default();
 
-    let auth = yup_oauth2::read_service_account_key(gcp_drive_key)
+    let gcp_drive_key = resolve_required_string(
+        config.service_account_key_path,
+        "GCP_DRIVE_KEY",
+        "service_account_key_path",
+    )?;
+
+    let auth = yup_oauth2::read_service_account_key(&gcp_drive_key)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -26,7 +32,11 @@ pub async fn get_drive_client() -> Result<GCPDriveClient, String> {
                 service = "google_drive",
                 "Failed to read service account key"
             );
-            format!("Failed to read GCP key: {}", e)
+            AppError::config_error(
+                "service_account_key".to_string(),
+                Some("GCP_DRIVE_KEY".to_string()),
+                format!("Failed to read GCP key: {}", e),
+            )
         })?;
 
     let authenticator = ServiceAccountAuthenticator::builder(auth)
@@ -38,7 +48,11 @@ pub async fn get_drive_client() -> Result<GCPDriveClient, String> {
                 service = "google_drive",
                 "Failed to build authenticator"
             );
-            format!("Failed to build GCP auth: {}", e)
+            AppError::config_error(
+                "authenticator".to_string(),
+                None,
+                format!("Failed to build GCP auth: {}", e),
+            )
         })?;
 
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
@@ -49,7 +63,11 @@ pub async fn get_drive_client() -> Result<GCPDriveClient, String> {
                 service = "google_drive",
                 "Failed to build HTTPS connector"
             );
-            format!("Failed to build HTTPS connector: {}", e)
+            AppError::config_error(
+                "https_connector".to_string(),
+                None,
+                format!("Failed to build HTTPS connector: {}", e),
+            )
         })?
         .https_or_http()
         .enable_http1()

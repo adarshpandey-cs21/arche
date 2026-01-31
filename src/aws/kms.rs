@@ -2,15 +2,23 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_kms::{Client, primitives::Blob};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use crate::config::resolve_with_default;
 use crate::error::AppError;
 
-pub async fn get_kms_client() -> Client {
-    let region = Region::new("ap-south-1");
-    let config = aws_config::defaults(BehaviorVersion::latest())
+pub use crate::config::aws::{AwsConfig, AwsConfigBuilder};
+
+const DEFAULT_REGION: &str = "ap-south-1";
+
+pub async fn get_kms_client(config: impl Into<Option<AwsConfig>>) -> Client {
+    let config = config.into().unwrap_or_default();
+    let region_str = resolve_with_default(config.region, "AWS_REGION", DEFAULT_REGION.to_string());
+    let region = Region::new(region_str);
+
+    let aws_config = aws_config::defaults(BehaviorVersion::latest())
         .region(region)
         .load()
         .await;
-    Client::new(&config)
+    Client::new(&aws_config)
 }
 
 pub struct KMSClient {

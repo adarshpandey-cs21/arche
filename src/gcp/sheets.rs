@@ -3,21 +3,27 @@ use google_sheets4::{
     yup_oauth2::{self, ServiceAccountAuthenticator},
 };
 
+use crate::config::resolve_required_string;
+use crate::error::AppError;
+
+pub use crate::config::gcp::{GcpSheetsConfig, GcpSheetsConfigBuilder};
+
 pub type GCPSheetsClient =
     Sheets<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>>;
 
 #[allow(dead_code)]
-pub async fn get_sheets_client() -> Result<GCPSheetsClient, String> {
-    let gcp_sheets_key = std::env::var("GCP_SHEETS_KEY").map_err(|e| {
-        tracing::error!(
-            error = %e,
-            env_var = "GCP_SHEETS_KEY",
-            "Missing GCP Sheets configuration"
-        );
-        format!("GCP_SHEETS_KEY not configured: {}", e)
-    })?;
+pub async fn get_sheets_client(
+    config: impl Into<Option<GcpSheetsConfig>>,
+) -> Result<GCPSheetsClient, AppError> {
+    let config = config.into().unwrap_or_default();
 
-    let auth = yup_oauth2::read_service_account_key(gcp_sheets_key)
+    let gcp_sheets_key = resolve_required_string(
+        config.service_account_key_path,
+        "GCP_SHEETS_KEY",
+        "service_account_key_path",
+    )?;
+
+    let auth = yup_oauth2::read_service_account_key(&gcp_sheets_key)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -25,7 +31,11 @@ pub async fn get_sheets_client() -> Result<GCPSheetsClient, String> {
                 service = "google_sheets",
                 "Failed to read service account key"
             );
-            format!("Failed to read GCP key: {}", e)
+            AppError::config_error(
+                "service_account_key".to_string(),
+                Some("GCP_SHEETS_KEY".to_string()),
+                format!("Failed to read GCP key: {}", e),
+            )
         })?;
 
     let authenticator = ServiceAccountAuthenticator::builder(auth)
@@ -37,7 +47,11 @@ pub async fn get_sheets_client() -> Result<GCPSheetsClient, String> {
                 service = "google_sheets",
                 "Failed to build authenticator"
             );
-            format!("Failed to build GCP auth: {}", e)
+            AppError::config_error(
+                "authenticator".to_string(),
+                None,
+                format!("Failed to build GCP auth: {}", e),
+            )
         })?;
 
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
@@ -48,7 +62,11 @@ pub async fn get_sheets_client() -> Result<GCPSheetsClient, String> {
                 service = "google_sheets",
                 "Failed to build HTTPS connector"
             );
-            format!("Failed to build HTTPS connector: {}", e)
+            AppError::config_error(
+                "https_connector".to_string(),
+                None,
+                format!("Failed to build HTTPS connector: {}", e),
+            )
         })?
         .https_or_http()
         .enable_http1()

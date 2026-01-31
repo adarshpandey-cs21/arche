@@ -2,23 +2,50 @@ use bb8::{Pool, PooledConnection};
 use bb8_redis::RedisConnectionManager;
 use bb8_redis::redis::AsyncCommands;
 
+use crate::config::{resolve_optional_string, resolve_required, resolve_required_string};
+use crate::error::AppError;
+
+pub use crate::config::redis::{RedisConfig, RedisConfigBuilder};
+
 pub type RedisPool = bb8::Pool<bb8_redis::RedisConnectionManager>;
 
 #[allow(dead_code)]
-pub async fn get_redis_pool() -> Pool<RedisConnectionManager> {
-    // reading env variables for redis
-    let redis_host = std::env::var("REDIS_HOST").expect("REDIS_HOST is not set");
-    let redis_port = std::env::var("REDIS_PORT").expect("REDIS_PORT is not set");
-    let redis_max_conn = std::env::var("REDIS_MAX_CONN").expect("REDIS_MAX_CONN is not set");
+pub async fn get_redis_pool(
+    config: impl Into<Option<RedisConfig>>,
+) -> Result<Pool<RedisConnectionManager>, AppError> {
+    let config = config.into().unwrap_or_default();
 
-    let redis_url = format!("redis://{}:{}", redis_host, redis_port);
+    let host = resolve_required_string(config.host, "REDIS_HOST", "host")?;
+    let port: u16 = resolve_required(config.port, "REDIS_PORT", "port")?;
+    let max_conn: u32 =
+        resolve_required(config.max_connections, "REDIS_MAX_CONN", "max_connections")?;
+    let password = resolve_optional_string(config.password, "REDIS_PASSWORD");
 
-    let redis_conn_manager = bb8_redis::RedisConnectionManager::new(redis_url).unwrap();
+    let redis_url = if let Some(pwd) = password {
+        format!("redis://:{}@{}:{}", pwd, host, port)
+    } else {
+        format!("redis://{}:{}", host, port)
+    };
+
+    let redis_conn_manager = bb8_redis::RedisConnectionManager::new(redis_url).map_err(|e| {
+        AppError::config_error(
+            "connection_manager".to_string(),
+            None,
+            format!("Failed to create Redis connection manager: {}", e),
+        )
+    })?;
+
     bb8::Pool::builder()
-        .max_size(redis_max_conn.parse::<u32>().unwrap())
+        .max_size(max_conn)
         .build(redis_conn_manager)
         .await
-        .unwrap()
+        .map_err(|e| {
+            AppError::config_error(
+                "pool".to_string(),
+                None,
+                format!("Failed to create Redis pool: {}", e),
+            )
+        })
 }
 
 pub async fn _get_redis_conn(

@@ -36,6 +36,12 @@ pub enum AppError {
         message: Option<String>,
         description: Option<String>,
     },
+    #[error("Configuration Error")]
+    ConfigError {
+        field: String,
+        env_var: Option<String>,
+        reason: String,
+    },
 }
 
 impl AppError {
@@ -49,6 +55,7 @@ impl AppError {
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            Self::ConfigError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -90,6 +97,14 @@ impl AppError {
             error_values: errors,
             message,
             description,
+        }
+    }
+
+    pub fn config_error(field: String, env_var: Option<String>, reason: String) -> Self {
+        Self::ConfigError {
+            field,
+            env_var,
+            reason,
         }
     }
 }
@@ -160,6 +175,21 @@ impl IntoResponse for AppError {
                 )
                     .into_response();
             }
+            Self::ConfigError {
+                field,
+                env_var,
+                reason,
+            } => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ConfigErrorDetails {
+                        field,
+                        env_var,
+                        reason,
+                    }),
+                )
+                    .into_response();
+            }
             _ => (),
         }
 
@@ -178,4 +208,11 @@ struct ErrorDetails {
 struct InternalErrorDetails {
     error: String,
     message: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ConfigErrorDetails {
+    field: String,
+    env_var: Option<String>,
+    reason: String,
 }
