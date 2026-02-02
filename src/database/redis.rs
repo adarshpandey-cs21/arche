@@ -50,17 +50,40 @@ pub async fn get_redis_pool(
 
 pub async fn _get_redis_conn(
     redis_pool: &Pool<RedisConnectionManager>,
-) -> PooledConnection<'_, RedisConnectionManager> {
-    redis_pool.get().await.unwrap()
+) -> Result<PooledConnection<'_, RedisConnectionManager>, AppError> {
+    redis_pool.get().await.map_err(|e| {
+        AppError::internal_error(
+            e.to_string(),
+            Some("Failed to get Redis connection from pool".to_string()),
+        )
+    })
 }
 
-pub async fn test_redis(redis_pool: bb8::Pool<bb8_redis::RedisConnectionManager>) -> bool {
-    let mut redis_conn: PooledConnection<RedisConnectionManager> = redis_pool.get().await.unwrap();
+pub async fn test_redis(
+    redis_pool: bb8::Pool<bb8_redis::RedisConnectionManager>,
+) -> Result<bool, AppError> {
+    let mut redis_conn: PooledConnection<RedisConnectionManager> =
+        redis_pool.get().await.map_err(|e| {
+            AppError::internal_error(
+                e.to_string(),
+                Some("Failed to get Redis connection from pool".to_string()),
+            )
+        })?;
+
     redis_conn
         .set::<&str, &str, ()>("test-key", "test-value")
         .await
-        .unwrap();
-    let value: String = redis_conn.get("test-key").await.unwrap();
-    let _: () = redis_conn.del("test-key").await.unwrap();
-    value == "test-value"
+        .map_err(|e| {
+            AppError::internal_error(e.to_string(), Some("Failed to set test key".to_string()))
+        })?;
+
+    let value: String = redis_conn.get("test-key").await.map_err(|e| {
+        AppError::internal_error(e.to_string(), Some("Failed to get test key".to_string()))
+    })?;
+
+    let _: () = redis_conn.del("test-key").await.map_err(|e| {
+        AppError::internal_error(e.to_string(), Some("Failed to delete test key".to_string()))
+    })?;
+
+    Ok(value == "test-value")
 }

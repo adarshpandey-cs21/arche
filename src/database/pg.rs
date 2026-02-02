@@ -93,7 +93,7 @@ pub async fn get_pg_pool(config: impl Into<Option<PgConfig>>) -> Result<PgPool, 
         })
 }
 
-pub async fn test_pg(pg_pool: sqlx::PgPool) -> bool {
+pub async fn test_pg(pg_pool: sqlx::PgPool) -> Result<bool, AppError> {
     let insert_query = r#"
     INSERT INTO health (id, value) VALUES ($1, $2)"#;
     let select_query = r#"
@@ -109,19 +109,29 @@ pub async fn test_pg(pg_pool: sqlx::PgPool) -> bool {
         .bind(value)
         .execute(&pg_pool)
         .await
-        .expect("Failed to insert data");
+        .map_err(|e| {
+            AppError::internal_error(e.to_string(), Some("Failed to insert data".to_string()))
+        })?;
 
     let select_result = sqlx::query_as::<_, PgHealth>(select_query)
         .bind(&id)
         .fetch_one(&pg_pool)
         .await
-        .expect("Failed to select data");
+        .map_err(|e| {
+            AppError::internal_error(e.to_string(), Some("Failed to select data".to_string()))
+        })?;
 
     sqlx::query(delete_query)
         .bind(&id)
         .execute(&pg_pool)
         .await
-        .expect("Failed to delete data");
+        .map_err(|e| {
+            AppError::internal_error(e.to_string(), Some("Failed to delete data".to_string()))
+        })?;
 
-    insert_result.rows_affected() == 1 && select_result.id == id && select_result.value == value
+    Ok(
+        insert_result.rows_affected() == 1
+            && select_result.id == id
+            && select_result.value == value,
+    )
 }

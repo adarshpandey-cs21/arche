@@ -47,25 +47,27 @@ pub fn generate_tokens<AccessTokenData: Serialize, RefreshTokenData: Serialize>(
     refresh_token_data: RefreshTokenData,
     access_secret: &String,
     refresh_secret: &String,
-) -> types::AuthTokens {
-    let access_token = generate_token(access_token_data, access_secret);
-    let refresh_token = generate_token(refresh_token_data, refresh_secret);
+) -> Result<types::AuthTokens, Error> {
+    let access_token = generate_token(access_token_data, access_secret)?;
+    let refresh_token = generate_token(refresh_token_data, refresh_secret)?;
 
-    AuthTokens {
+    Ok(AuthTokens {
         access_token,
         refresh_token,
-    }
+    })
 }
 
-pub fn generate_token<TokenData: Serialize>(data: TokenData, secret: &String) -> String {
+pub fn generate_token<TokenData: Serialize>(
+    data: TokenData,
+    secret: &String,
+) -> Result<String, Error> {
     encode_token(&data, secret)
 }
 
-fn encode_token<T: Serialize>(data: &T, secret: &String) -> String {
+fn encode_token<T: Serialize>(data: &T, secret: &String) -> Result<String, Error> {
     encode(
         &Header::default(),
         data,
         &EncodingKey::from_secret(secret.as_ref()),
     )
-    .expect("Failed to generate token")
 }

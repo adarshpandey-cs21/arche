@@ -58,16 +58,21 @@ impl FromOffsetDateTime for OffsetDateTime {
     }
 }
 
-pub fn validate_timestamp(timestamp: i64, is_in_past: bool) -> bool {
+pub fn validate_timestamp(timestamp: i64, is_in_past: bool) -> Result<bool, AppError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("Failed to get current time")
+        .map_err(|e| {
+            AppError::internal_error(
+                e.to_string(),
+                Some("Failed to get current time".to_string()),
+            )
+        })?
         .as_secs() as i64;
 
     if is_in_past {
-        timestamp < now
+        Ok(timestamp < now)
     } else {
-        timestamp > now
+        Ok(timestamp > now)
     }
 }
 
