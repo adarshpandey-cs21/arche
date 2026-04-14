@@ -10,6 +10,7 @@ pub struct VertexConfig {
     pub project_id: Option<String>,
     pub region: Option<String>,
     pub service_account_path: Option<String>,
+    pub service_account_json: Option<String>,
 }
 
 impl VertexConfig {
@@ -30,6 +31,11 @@ impl VertexConfig {
 
     pub fn with_service_account_path(mut self, val: impl Into<String>) -> Self {
         self.service_account_path = Some(val.into());
+        self
+    }
+
+    pub fn with_service_account_json(mut self, val: impl Into<String>) -> Self {
+        self.service_account_json = Some(val.into());
         self
     }
 }
@@ -63,25 +69,39 @@ pub(crate) async fn resolve_auth(config: Option<VertexConfig>) -> Result<Resolve
     if let Some(project_id) = project_id {
         let region =
             resolve_with_default(config.region, "VERTEX_REGION", "asia-south1".to_string());
-        let service_account_path = resolve_required(
-            config.service_account_path,
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "service_account_path",
-        )?;
 
-        let sa_key = yup_oauth2::read_service_account_key(&service_account_path)
-            .await
-            .map_err(|e| {
+        let sa_key = if let Some(json) = config.service_account_json {
+            yup_oauth2::parse_service_account_key(json).map_err(|e| {
                 tracing::error!(
                     error = %e,
                     service = "vertex_ai",
-                    "Failed to read service account key"
+                    "Failed to parse service account JSON"
                 );
                 AppError::internal_error(
-                    format!("Failed to read Vertex AI service account key: {e}"),
+                    format!("Failed to parse Vertex AI service account JSON: {e}"),
                     None,
                 )
-            })?;
+            })?
+        } else {
+            let path = resolve_required(
+                config.service_account_path,
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "service_account_path or service_account_json",
+            )?;
+            yup_oauth2::read_service_account_key(&path)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        service = "vertex_ai",
+                        "Failed to read service account key"
+                    );
+                    AppError::internal_error(
+                        format!("Failed to read Vertex AI service account key: {e}"),
+                        None,
+                    )
+                })?
+        };
 
         let authenticator = yup_oauth2::ServiceAccountAuthenticator::builder(sa_key)
             .build()

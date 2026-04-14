@@ -1,196 +1,331 @@
+<div align="center">
+
 # arche
 
-**arche** is an opinionated backend foundation crate for building production-ready
-applications with **Axum**.
+**The opinionated backend foundation for Axum applications.**
 
-It provides a curated set of building blocks commonly required in modern backend
-services—cloud integrations, databases, authentication, middleware, and logging—
-so you can focus on business logic instead of repetitive infrastructure wiring.
+[![Crates.io](https://img.shields.io/crates/v/arche.svg)](https://crates.io/crates/arche)
+[![Documentation](https://img.shields.io/docsrs/arche)](https://docs.rs/arche)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`arche` is designed to *sit around Axum*, not replace it.
+Cloud integrations, databases, auth, LLM inference, encryption, streaming JSON/CSV,
+WebSockets, and structured error handling — wired up and ready to go.
+
+`arche` sits *around* Axum, not in place of it.
+
+[Getting Started](#getting-started) · [Modules](#modules) · [API Reference](#api-reference) · [Design Principles](#design-principles)
+
+</div>
+
+---
 
 ## Why arche?
 
-Most backend services end up re-implementing the same infrastructure concerns:
+Every backend service re-implements the same infrastructure plumbing — cloud SDK
+setup, database pools, auth primitives, error handling, config resolution. **arche**
+bundles these into a single, cohesive Rust crate built on well-established libraries
+so you can skip the boilerplate and focus on business logic.
 
-- Cloud SDK setup and ergonomics
-- Database connection management
-- Authentication primitives
-- Middleware patterns
-- Logging and tracing configuration
-- Common error handling
+## Getting Started
 
-**arche** brings these pieces together into a cohesive, Rust-native foundation,
-built on top of well-established libraries and SDKs.
+Add arche to your `Cargo.toml`:
 
-## What arche provides
+```toml
+[dependencies]
+arche = "2.3.0"
+```
 
-### `aws`
+## Modules
 
-AWS SDK integrations built on official SDKs:
+| Module | What it does |
+|---|---|
+| [`aws`](#aws) | S3, SES, and KMS via official AWS SDKs |
+| [`gcp`](#gcp) | Google Drive, Sheets, and **Vertex AI** (Gemini + Claude) |
+| [`database`](#database) | Postgres and Redis connection pooling with health checks |
+| [`jwt`](#jwt) | HS256 token generation, verification, and expiry helpers |
+| [`csv`](#csv) | Async CSV read/write — batch, streaming, and from URL |
+| [`json`](#json) | Streaming JSON array parsing with metadata extraction |
+| [`crypto`](#crypto) | AES-128-CBC encryption with PBKDF2 key derivation |
+| [`sockets`](#sockets) | WebSocket connection registry with broadcast |
+| [`error`](#error) | Axum-compatible structured error responses (400–503) |
+| [`utils`](#utils) | Timestamp validation, date/time conversions, pagination |
 
-- **S3**: Client initialization with support for IAM roles or environment-based credentials
-- **SES**: Email sending with SES, including templated emails
-- **KMS**: Key Management Service for encryption/decryption operations
+Every service module exports a **config builder** so you can wire up credentials
+programmatically — or omit it entirely and let arche resolve everything from
+environment variables.
 
-### `gcp`
+```rust
+// Pass None to resolve entirely from env vars
+let pool = arche::database::pg::get_pg_pool(None).await?;
 
-Google Cloud Platform integrations:
+// Or configure explicitly
+let config = arche::database::pg::PgConfigBuilder::default()
+    .host(Some("localhost".into()))
+    .port(Some(5432))
+    .build();
+let pool = arche::database::pg::get_pg_pool(config).await?;
+```
 
-- **Drive**: Google Drive client with service account authentication
-- **Sheets**: Google Sheets client with service account authentication
+All components are modular and explicit — nothing is hidden or magical.
 
-### `database`
+---
 
-Database connection management:
+## API Reference
 
-- **Postgres**: Connection pooling with `sqlx`, configurable credentials, health checks
-- **Redis**: Connection pooling with `bb8`, async operations, health checks
+### AWS
 
-### `jwt`
-
-JWT utilities for authentication and authorization:
-
-- Token generation and verification (HS256)
-- Access/refresh token pair generation
-- Token expiry helpers
-- Custom claims support
-
-### `csv`
-
-Async CSV processing via a single reusable `CsvClient`:
-
-- **Batch**: `read_all`, `read_file`, `write_all`, `write_file` — load everything at once
-- **Streaming**: `reader` / `writer` factories for memory-efficient record-by-record I/O
-- Configurable delimiter, quoting, escaping, headers, and more
-
-### `error`
-
-Axum-compatible error handling:
-
-- `AppError` enum with HTTP error variants covering 400, 401, 403, 404, 409, 422, 424, 500, and 503
-- Automatic `IntoResponse` conversion with structured JSON bodies
-- `InternalError` responses are sanitized by default (no leaked SQL, infra details)
-- Optional `verbose-errors` feature flag for dev/staging diagnostics
-- `DependencyFailed` variant for upstream service failures (OpenSearch, Shopify, S3, etc.)
-
-### `utils`
-
-Common utilities for backend services:
-
-- Timestamp validation and conversion helpers
-- `OffsetDateTime` utilities (Unix, ISO8601)
-- Pagination parameter types
-
-All components are modular and explicit—nothing is hidden or magical.
-
-## Module Reference
-
-### AWS (`arche::aws`)
+AWS SDK integrations built on official SDKs. Default region: `ap-south-1`.
 
 #### S3
 
-Initialize an S3 client with automatic credential management:
-
 ```rust
-use arche::aws::s3::get_s3_client;
+use arche::aws::s3::{get_s3_client, S3ConfigBuilder};
 
-let client = get_s3_client().await;
+// From env vars
+let client = get_s3_client(None).await?;
+
+// Or with explicit config
+let config = S3ConfigBuilder::default()
+    .credential_source(Some("env".into()))
+    .access_key_id(Some("AKIA...".into()))
+    .secret_access_key(Some("secret".into()))
+    .build();
+let client = get_s3_client(config).await?;
 ```
 
-**Environment Variables:**
-
-- `S3_CRED_SOURCE`: `"IAM"` (default) or `"env"` for environment-based credentials
-- `S3_ACCESS_KEY_ID`: Required when using `"env"` credential source
-- `S3_SECRET_ACCESS_KEY`: Required when using `"env"` credential source
+| Env Var | Description |
+|---|---|
+| `S3_CRED_SOURCE` | `"IAM"` (default) or `"env"` |
+| `S3_ACCESS_KEY_ID` | Required when source is `"env"` |
+| `S3_SECRET_ACCESS_KEY` | Required when source is `"env"` |
+| `S3_REGION` | AWS region (default: `ap-south-1`) |
 
 #### KMS
 
-Encrypt and decrypt data using AWS Key Management Service:
-
 ```rust
-use arche::aws::kms::{get_kms_client, KMSClient};
+use arche::aws::kms::KMSClient;
 
-// Initialize with default region (ap-south-1)
-let client = get_kms_client().await;
-let kms = KMSClient::new(client);
+// Default region
+let kms = KMSClient::new_with_region("ap-south-1").await;
 
-// Or with a specific region
-let kms = KMSClient::new_with_region("us-east-1").await;
+// Encrypt / decrypt
+let ciphertext = kms.encrypt("alias/my-key", b"sensitive data").await?;
+let plaintext = kms.decrypt(&ciphertext).await?;
 
-// Encrypt data
-let plaintext = b"sensitive data";
-let ciphertext = kms.encrypt("alias/my-key", plaintext).await?;
-
-// Decrypt data
-let decrypted = kms.decrypt(&ciphertext).await?;
+// Decrypt base64-encoded ciphertext directly
+let plaintext = kms.decrypt_base64("base64string...").await?;
 ```
 
-**Credentials:** Uses IAM role credentials by default (recommended for EC2/ECS/Lambda).
+| Env Var | Description |
+|---|---|
+| `AWS_REGION` | AWS region (default: `ap-south-1`) |
 
-### GCP (`arche::gcp`)
+#### SES
+
+```rust
+use arche::aws::ses::SESClient;
+
+let ses = SESClient::new_with_region("ap-south-1").await;
+
+// Plain email (with optional HTML body)
+let message_id = ses.send_email(
+    "from@example.com",
+    "to@example.com",
+    "Subject line",
+    "Plain text body",
+    Some("<h1>HTML body</h1>"),
+).await?;
+
+// Templated email
+let message_id = ses.send_templated_email(
+    "from@example.com",
+    "to@example.com",
+    "TemplateName",
+    r#"{"name": "Alice"}"#,
+).await?;
+```
+
+| Env Var | Description |
+|---|---|
+| `AWS_REGION` | AWS region (default: `ap-south-1`) |
+
+---
+
+### GCP
+
+Google Cloud Platform integrations using service account authentication.
 
 #### Drive
 
 ```rust
-use arche::gcp::drive::get_drive_client;
+use arche::gcp::drive::{get_drive_client, GcpDriveConfigBuilder};
 
-let drive = get_drive_client().await?;
+let drive = get_drive_client(None).await?;
 ```
 
-**Environment Variables:**
-
-- `GCP_DRIVE_KEY`: Path to service account JSON key file
+| Env Var | Description |
+|---|---|
+| `GCP_DRIVE_KEY` | Path to service account JSON key file |
 
 #### Sheets
 
 ```rust
-use arche::gcp::sheets::get_sheets_client;
+use arche::gcp::sheets::{get_sheets_client, GcpSheetsConfigBuilder};
 
-let sheets = get_sheets_client().await?;
+let sheets = get_sheets_client(None).await?;
 ```
 
-**Environment Variables:**
+| Env Var | Description |
+|---|---|
+| `GCP_SHEETS_KEY` | Path to service account JSON key file |
 
-- `GCP_SHEETS_KEY`: Path to service account JSON key file
+#### Vertex AI
 
-### Database (`arche::database`)
+Unified LLM client for **Gemini** and **Anthropic Claude** models on Google Cloud.
+Supports both streaming and non-streaming inference, function calling, and flexible
+authentication (API key for Gemini, service account for both providers).
+
+```rust
+use arche::gcp::vertex::{
+    get_vertex_client, VertexConfig,
+    GenerateRequest, Message, Provider, StreamChunk,
+};
+
+// From env vars
+let client = get_vertex_client(None).await?;
+
+// Or with explicit config
+let client = get_vertex_client(
+    VertexConfig::default().with_api_key("your-api-key")
+).await?;
+
+let request = GenerateRequest::new(
+    Provider::Gemini,
+    "gemini-2.0-flash",
+    vec![Message::user("Explain quantum computing in one sentence.")],
+)
+.with_system("You are a helpful assistant.")
+.with_max_tokens(256)
+.with_temperature(0.7);
+
+// Non-streaming
+let response = client.generate(request).await?;
+println!("{}", response.text().unwrap());
+println!("Tokens: {:?}", response.usage);
+
+// Streaming
+use futures::StreamExt;
+
+let mut stream = client.stream_generate(request).await?;
+while let Some(chunk) = stream.next().await {
+    match chunk? {
+        StreamChunk::Text(text) => print!("{text}"),
+        StreamChunk::Done { finish_reason } => println!("\n[{finish_reason}]"),
+    }
+}
+```
+
+**Function calling:**
+
+```rust
+use arche::gcp::vertex::ToolDefinition;
+
+let tools = vec![ToolDefinition {
+    name: "get_weather".into(),
+    description: "Get current weather for a city".into(),
+    parameters: serde_json::json!({
+        "type": "object",
+        "properties": {
+            "city": { "type": "string" }
+        },
+        "required": ["city"]
+    }),
+}];
+
+let request = GenerateRequest::new(
+    Provider::Gemini,
+    "gemini-2.0-flash",
+    vec![Message::user("What's the weather in Tokyo?")],
+)
+.with_tools(tools);
+
+let response = client.generate(request).await?;
+for call in response.tool_calls() {
+    // Handle tool calls
+}
+```
+
+**Using Claude on Vertex AI** (requires service account auth):
+
+```rust
+let request = GenerateRequest::new(
+    Provider::Anthropic,
+    "claude-sonnet-4-20250514",
+    vec![Message::user("Hello, Claude!")],
+)
+.with_max_tokens(1024);
+
+let response = client.generate(request).await?;
+```
+
+**Authentication:**
+
+| Method | When | Env Vars |
+|---|---|---|
+| API Key | Gemini only | `VERTEX_API_KEY` or `GEMINI_API_KEY` |
+| Service Account | Gemini + Anthropic | `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` |
+
+If an API key is present, it takes priority. Service account auth is required for
+Anthropic models. Default region: `asia-south1`.
+
+---
+
+### Database
 
 #### Postgres
 
-```rust
-use arche::database::pg::{get_pg_pool, test_pg};
+Connection pooling with `sqlx`, configurable credentials, and health checks.
 
-let pool = get_pg_pool().await;
-let is_healthy = test_pg(pool.clone()).await;
+```rust
+use arche::database::pg::{get_pg_pool, test_pg, PgConfigBuilder};
+
+let pool = get_pg_pool(None).await?;
+let is_healthy = test_pg(pool.clone()).await?;
 ```
 
-**Environment Variables:**
-
-- `PG_HOST`: Database host
-- `PG_PORT`: Database port
-- `PG_DATABASE`: Database name
-- `PG_MAX_CONN`: Maximum connections in pool
-- `PG_CREDENTIALS`: JSON string with `username` and `password` (alternative)
-- `PG_USERNAME`: Username (if not using `PG_CREDENTIALS`)
-- `PG_PASSWORD`: Password (if not using `PG_CREDENTIALS`)
+| Env Var | Description |
+|---|---|
+| `PG_HOST` | Database host |
+| `PG_PORT` | Database port |
+| `PG_DATABASE` | Database name |
+| `PG_MAX_CONN` | Maximum pool connections |
+| `PG_USERNAME` | Username |
+| `PG_PASSWORD` | Password |
+| `PG_CREDENTIALS` | JSON string `{"username":"...","password":"..."}` (alternative to separate vars) |
 
 #### Redis
 
-```rust
-use arche::database::redis::{get_redis_pool, test_redis};
+Connection pooling with `bb8`, optional password auth, and health checks.
 
-let pool = get_redis_pool().await;
-let is_healthy = test_redis(pool.clone()).await;
+```rust
+use arche::database::redis::{get_redis_pool, test_redis, RedisConfigBuilder};
+
+let pool = get_redis_pool(None).await?;
+let is_healthy = test_redis(pool.clone()).await?;
 ```
 
-**Environment Variables:**
+| Env Var | Description |
+|---|---|
+| `REDIS_HOST` | Redis host |
+| `REDIS_PORT` | Redis port |
+| `REDIS_MAX_CONN` | Maximum pool connections |
+| `REDIS_PASSWORD` | Optional password |
 
-- `REDIS_HOST`: Redis host
-- `REDIS_PORT`: Redis port
-- `REDIS_MAX_CONN`: Maximum connections in pool
+---
 
-### JWT (`arche::jwt`)
+### JWT
+
+Token generation and verification using HS256.
 
 ```rust
 use arche::jwt::{generate_tokens, verify_token, generate_expiry_time};
@@ -202,35 +337,27 @@ struct Claims {
     exp: usize,
 }
 
-// Generate tokens
-let access_claims = Claims { sub: "user_id".into(), exp: generate_expiry_time(3600) };
-let refresh_claims = Claims { sub: "user_id".into(), exp: generate_expiry_time(86400) };
-
+// Generate an access + refresh token pair
 let tokens = generate_tokens(
-    access_claims,
-    refresh_claims,
+    Claims { sub: "user_123".into(), exp: generate_expiry_time(3600) },
+    Claims { sub: "user_123".into(), exp: generate_expiry_time(86400) },
     &access_secret,
     &refresh_secret,
-);
+)?;
 
-// Verify token
-let token_data = verify_token::<Claims>(&token, secret, Some("audience".into()))?;
+// Verify a token
+let data = verify_token::<Claims>(&tokens.access_token, &access_secret, None)?;
 ```
 
-### CSV (`arche::csv`)
+---
 
-Async CSV processing powered by `csv-async`. Create one `CsvClient`, reuse it everywhere:
+### CSV
+
+Async CSV processing powered by `csv-async`. Supports reading from bytes, files, and
+URLs — with both batch and streaming modes.
 
 ```rust
 use arche::csv::CsvClient;
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct Record {
-    name: String,
-    age: u32,
-    city: String,
-}
 
 // Default config (comma-delimited, with headers)
 let csv = CsvClient::new();
@@ -242,417 +369,236 @@ let csv = CsvClient::new()
     .flexible(true);
 ```
 
-#### Batch reading
+#### Reading
 
 ```rust
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Record { name: String, age: u32, city: String }
+
 // From bytes
-let data = b"name,age,city\nAlice,30,NYC\nBob,25,LA";
-let records: Vec<Record> = csv.read_all(data.as_slice()).await?;
+let records: Vec<Record> = csv.read().from_bytes(data).deserialize().await?;
 
-// From a file
-let records: Vec<Record> = csv.read_file("data.csv").await?;
+// From file
+let records: Vec<Record> = csv.read().from_file("data.csv").deserialize().await?;
 
-// Raw string records (no serde)
-let raw_records = csv.read_records(data.as_slice()).await?;
+// From URL
+let records: Vec<Record> = csv.read().from_url("https://example.com/data.csv")
+    .deserialize().await?;
+
+// Batch processing (memory-efficient for large files)
+csv.read().from_file("large.csv")
+    .deserialize_batched(1000, |batch: Vec<Record>| async move {
+        // Process 1000 records at a time
+        Ok(())
+    }).await?;
 ```
 
-#### Batch writing
+#### Writing
 
 ```rust
+use serde::Serialize;
+
 #[derive(Serialize)]
-struct Output {
-    name: String,
-    score: f64,
-}
+struct Output { name: String, score: f64 }
 
 let records = vec![
     Output { name: "Alice".into(), score: 95.5 },
-    Output { name: "Bob".into(), score: 87.0 },
+    Output { name: "Bob".into(),   score: 87.0 },
 ];
 
-// Write to in-memory bytes
+// To bytes
 let bytes: Vec<u8> = csv.write_all(&records).await?;
 
-// Write to a file
+// To file
 csv.write_file("output.csv", &records).await?;
 ```
 
-#### Streaming (memory-efficient)
+#### Streaming
 
 ```rust
 // Record-by-record reading
-let mut stream = csv.reader_from_file("large.csv").await?;
-while let Some(result) = stream.next_deserialized::<Record>().await {
-    let record = result?;
-    // process one record at a time
+let mut stream = csv.read().from_file("large.csv").stream().await?;
+while let Some(record) = stream.next_deserialized::<Record>().await {
+    let record = record?;
 }
 
 // Record-by-record writing
 let mut writer = csv.writer_to_file("output.csv").await?;
 writer.serialize(&Output { name: "Alice".into(), score: 95.5 }).await?;
-writer.write_fields(["Bob", "87.0"]).await?;
 writer.finish().await?;
 ```
 
-### Error (`arche::error`)
+---
+
+### JSON
+
+Streaming JSON array parsing optimized for large payloads. Extracts metadata fields
+before the target array and streams array elements one-by-one or in batches —
+without loading the full document into memory.
+
+```rust
+use arche::json::JsonClient;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Item { id: u64, name: String }
+
+let json = JsonClient::new();
+
+// Stream a root-level JSON array from bytes
+let source = json.from_bytes(data);
+let mut stream = source.stream_root_array();
+
+while let Some(item) = stream.next::<Item>().await {
+    let item = item?;
+}
+
+// Stream a nested array with metadata capture
+// Given: {"total": 1000, "items": [{...}, {...}, ...]}
+let json = JsonClient::new();
+let source = json.from_bytes(data);
+let mut stream = source.stream_array("items").await;
+
+while let Some(item) = stream.next::<Item>().await {
+    let item = item?;
+}
+let total: u64 = stream.field("total")?;
+
+// Batch iteration
+let batch = stream.next_batch::<Item>(100).await;
+
+// Stream directly from S3
+let source = JsonClient::new().from_s3(&s3_client, "my-bucket", "data.json").await?;
+let mut stream = source.stream_array("results").await;
+```
+
+---
+
+### Crypto
+
+AES-128-CBC encryption with PBKDF2-HMAC-SHA1 key derivation (65,536 iterations).
+
+```rust
+use arche::crypto::{encrypt_cbc, decrypt_cbc};
+
+let secret = "my-secret-key";
+let salt = "my-salt-value-16"; // minimum 16 bytes
+
+// Encrypt — returns raw ciphertext bytes
+let ciphertext = encrypt_cbc(secret, salt, "sensitive data")?;
+
+// Decrypt — expects base64-encoded ciphertext input
+let plaintext = decrypt_cbc(secret, salt, &base64_ciphertext)?;
+```
+
+---
+
+### Sockets
+
+WebSocket connection registry with broadcast support. Manages a thread-safe map of
+active connections for fan-out messaging.
+
+```rust
+use arche::sockets::SocketConnectionManager;
+
+let manager = SocketConnectionManager::new();
+
+// Register a connection (typically in a WebSocket upgrade handler)
+manager.add(&connection_id, sender)?;
+
+// Broadcast to all connected clients
+manager.broadcast("Hello, everyone!".into())?;
+
+// List active connections
+let ids = manager.get_connections()?;
+
+// Remove a connection on disconnect
+manager.remove(connection_id)?;
+```
+
+---
+
+### Error
+
+Axum-compatible structured error handling. Every variant converts to a JSON response
+with the appropriate HTTP status code.
 
 ```rust
 use arche::error::AppError;
-use axum::response::IntoResponse;
 
-async fn handler() -> Result<impl IntoResponse, AppError> {
+async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
     Err(AppError::Unauthorized)
 }
-
-// 400 — bad request with details
-let error = AppError::bad_request(
-    Some(errors_map),
-    Some("Invalid input".into()),
-    Some("Field validation failed".into()),
-);
-
-// 404 — resource not found
-let error = AppError::not_found("client");
-
-// 409 — unique constraint violation
-let error = AppError::conflict("A client with this name already exists");
-
-// 424 — upstream dependency failed (retryable)
-let error = AppError::dependency_failed("opensearch", "index timeout");
-
-// 424 — upstream dependency failed (permanent)
-let error = AppError::dependency_failed_permanent("shopify", "invalid API key");
-
-// 500 — internal error (response body is sanitized by default)
-let error = AppError::internal_error("SQL error: ...".into(), None);
 ```
 
-**Error Variants:**
+**Variants:**
 
 | Variant | Status | Constructor |
 |---|---|---|
-| `BadRequest` | 400 | `bad_request(errors, message, description)` |
+| `BadRequest` | 400 | `AppError::bad_request(errors, message, description)` |
 | `Unauthorized` | 401 | Direct construction |
 | `Forbidden` | 403 | Direct construction |
-| `NotFound` | 404 | `not_found(resource)` |
-| `Conflict` | 409 | `conflict(message)` |
-| `UnprocessableEntity` | 422 | `unprocessable_entity(errors, message, description)` |
-| `DependencyFailed` | 424 | `dependency_failed(upstream, detail)` |
-| `InternalError` | 500 | `internal_error(error, message)` |
+| `NotFound` | 404 | `AppError::not_found("resource")` |
+| `Conflict` | 409 | `AppError::conflict("message")` |
+| `UnprocessableEntity` | 422 | `AppError::unprocessable_entity(errors, message, description)` |
+| `DependencyFailed` | 424 | `AppError::dependency_failed("upstream", "detail")` |
+| `InternalError` | 500 | `AppError::internal_error(error, message)` |
 | `Unavailable` | 503 | Direct construction |
 
-**Feature Flags:**
-
-- `verbose-errors` — When enabled, `InternalError` returns the raw error string to the client instead of a sanitized message. Intended for dev/staging only.
+`InternalError` responses are **sanitized by default** — no leaked SQL or infra
+details. Enable `verbose-errors` to expose raw error details (dev/staging only):
 
 ```toml
-# In your Cargo.toml (dev/staging only)
-arche = { version = "2.2.0", features = ["verbose-errors"] }
+arche = { version = "2.3.0", features = ["verbose-errors"] }
 ```
 
-### Utils (`arche::utils`)
+---
+
+### Utils
+
+Date/time conversion traits and pagination helpers.
 
 ```rust
 use arche::utils::{validate_timestamp, FromOffsetDateTime, PaginationParams};
-use sqlx::types::time::OffsetDateTime;
+use time::OffsetDateTime;
 
-// Timestamp validation
-let is_future = validate_timestamp(timestamp, false);
+// Check if a timestamp is in the future
+let is_valid = validate_timestamp(timestamp, false)?;
 
-// DateTime conversion
-let iso_string = offset_dt.to_iso_string()?;
+// Convert OffsetDateTime to ISO string
+let iso = offset_dt.to_iso_string()?;
 
-// Pagination
-let params = PaginationParams {
-    page_number: Some(1),
-    page_size: Some(20),
-};
+// Pagination query params (for Axum extractors)
+let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 ```
+
+---
+
+## Re-exported Dependencies
+
+arche re-exports these crates so you don't need to add them separately:
+
+`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `google-drive3` · `google-sheets4`
+
+---
+
+## Design Principles
+
+- **Explicit over implicit** — no hidden global state or magic
+- **Composition over inheritance** — thin wrappers you combine as needed
+- **Production-first defaults** — sane defaults, sanitized errors, pooled connections
+- **Async-native** — built on Tokio from the ground up
 
 ## What arche is *not*
 
-- ❌ A framework that replaces Axum
-- ❌ A code generator or project template
-- ❌ A monolithic abstraction over third-party libraries
-- ❌ A "do-everything" utils crate
-
-`arche` favors composition over abstraction.
-
-## Design principles
-
-- **Explicit over implicit**
-- **Composition over inheritance**
-- **Thin wrappers over official SDKs**
-- **Production-first defaults**
-- **No global state**
-- **Async-first**
-
-## Why arche?
-
-Most backend services end up re-implementing the same infrastructure concerns:
-
-- Cloud SDK setup and ergonomics
-- Database connection management
-- Authentication primitives
-- Middleware patterns
-- Logging and tracing configuration
-- Common error handling
-
-**arche** brings these pieces together into a cohesive, Rust-native foundation,
-built on top of well-established libraries and SDKs.
+- A framework that replaces Axum
+- A code generator or project template
+- A monolithic abstraction over third-party libraries
 
 ---
 
-## What arche provides
+## License
 
-### `aws`
-AWS SDK integrations built on official SDKs:
-- **S3**: Client initialization with support for IAM roles or environment-based credentials
-- **SES**: Email sending with SES, including templated emails
-- **KMS**: Key Management Service for encryption/decryption operations
-
-### `gcp`
-Google Cloud Platform integrations:
-- **Drive**: Google Drive client with service account authentication
-- **Sheets**: Google Sheets client with service account authentication
-
-### `database`
-Database connection management:
-- **Postgres**: Connection pooling with `sqlx`, configurable credentials, health checks
-- **Redis**: Connection pooling with `bb8`, async operations, health checks
-
-### `jwt`
-JWT utilities for authentication and authorization:
-- Token generation and verification (HS256)
-- Access/refresh token pair generation
-- Token expiry helpers
-- Custom claims support
-
-### `csv`
-Async CSV processing via a single reusable `CsvClient`:
-- **Batch**: `read_all`, `read_file`, `write_all`, `write_file` — load everything at once
-- **Streaming**: `reader` / `writer` factories for memory-efficient record-by-record I/O
-- Configurable delimiter, quoting, escaping, headers, and more
-
-### `error`
-Axum-compatible error handling:
-- `AppError` enum with common HTTP error variants
-- Automatic `IntoResponse` conversion
-- Structured error responses with details
-
-### `utils`
-Common utilities for backend services:
-- Timestamp validation and conversion helpers
-- `OffsetDateTime` utilities (Unix, ISO8601)
-- Pagination parameter types
-
-All components are modular and explicit—nothing is hidden or magical.
-
----
-
-## Module Reference
-
-### AWS (`arche::aws`)
-
-#### S3
-Initialize an S3 client with automatic credential management:
-```rust
-use arche::aws::s3::get_s3_client;
-
-let client = get_s3_client().await;
-```
-
-**Environment Variables:**
-- `S3_CRED_SOURCE`: `"IAM"` (default) or `"env"` for environment-based credentials
-- `S3_ACCESS_KEY_ID`: Required when using `"env"` credential source
-- `S3_SECRET_ACCESS_KEY`: Required when using `"env"` credential source
-
-#### KMS
-Encrypt and decrypt data using AWS Key Management Service:
-
-```rust
-use arche::aws::kms::{get_kms_client, KMSClient};
-
-// Initialize with default region (ap-south-1)
-let client = get_kms_client().await;
-let kms = KMSClient::new(client);
-
-// Or with a specific region
-let kms = KMSClient::new_with_region("us-east-1").await;
-
-// Encrypt data
-let plaintext = b"sensitive data";
-let ciphertext = kms.encrypt("alias/my-key", plaintext).await?;
-
-// Decrypt data
-let decrypted = kms.decrypt(&ciphertext).await?;
-```
-
-**Credentials:** Uses IAM role credentials by default (recommended for EC2/ECS/Lambda).
-
----
-
-### GCP (`arche::gcp`)
-
-#### Drive
-```rust
-use arche::gcp::drive::get_drive_client;
-
-let drive = get_drive_client().await?;
-```
-
-**Environment Variables:**
-- `GCP_DRIVE_KEY`: Path to service account JSON key file
-
-#### Sheets
-```rust
-use arche::gcp::sheets::get_sheets_client;
-
-let sheets = get_sheets_client().await?;
-```
-
-**Environment Variables:**
-- `GCP_SHEETS_KEY`: Path to service account JSON key file
-
----
-
-### Database (`arche::database`)
-
-#### Postgres
-```rust
-use arche::database::pg::{get_pg_pool, test_pg};
-
-let pool = get_pg_pool().await;
-let is_healthy = test_pg(pool.clone()).await;
-```
-
-**Environment Variables:**
-- `PG_HOST`: Database host
-- `PG_PORT`: Database port
-- `PG_DATABASE`: Database name
-- `PG_MAX_CONN`: Maximum connections in pool
-- `PG_CREDENTIALS`: JSON string with `username` and `password` (alternative)
-- `PG_USERNAME`: Username (if not using `PG_CREDENTIALS`)
-- `PG_PASSWORD`: Password (if not using `PG_CREDENTIALS`)
-
-#### Redis
-```rust
-use arche::database::redis::{get_redis_pool, test_redis};
-
-let pool = get_redis_pool().await;
-let is_healthy = test_redis(pool.clone()).await;
-```
-
-**Environment Variables:**
-- `REDIS_HOST`: Redis host
-- `REDIS_PORT`: Redis port
-- `REDIS_MAX_CONN`: Maximum connections in pool
-
----
-
-### JWT (`arche::jwt`)
-
-```rust
-use arche::jwt::{generate_tokens, verify_token, generate_expiry_time};
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    exp: usize,
-}
-
-// Generate tokens
-let access_claims = Claims { sub: "user_id".into(), exp: generate_expiry_time(3600) };
-let refresh_claims = Claims { sub: "user_id".into(), exp: generate_expiry_time(86400) };
-
-let tokens = generate_tokens(
-    access_claims,
-    refresh_claims,
-    &access_secret,
-    &refresh_secret,
-);
-
-// Verify token
-let token_data = verify_token::<Claims>(&token, secret, Some("audience".into()))?;
-```
-
----
-
-### CSV (`arche::csv`)
-
-Async CSV processing powered by `csv-async`. Create one `CsvClient`, reuse it everywhere:
-
-```rust
-use arche::csv::CsvClient;
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct Record {
-    name: String,
-    age: u32,
-    city: String,
-}
-
-// Default config (comma-delimited, with headers)
-let csv = CsvClient::new();
-
-// Or customize
-let csv = CsvClient::new()
-    .delimiter(b';')
-    .has_headers(true)
-    .flexible(true);
-```
-
-#### Batch reading
-
-```rust
-// From bytes
-let data = b”name,age,city\nAlice,30,NYC\nBob,25,LA”;
-let records: Vec<Record> = csv.read_all(data.as_slice()).await?;
-
-// From a file
-let records: Vec<Record> = csv.read_file(“data.csv”).await?;
-
-// Raw string records (no serde)
-let raw_records = csv.read_records(data.as_slice()).await?;
-```
-
-#### Batch writing
-
-```rust
-#[derive(Serialize)]
-struct Output {
-    name: String,
-    score: f64,
-}
-
-let records = vec![
-    Output { name: “Alice”.into(), score: 95.5 },
-    Output { name: “Bob”.into(), score: 87.0 },
-];
-
-// Write to in-memory bytes
-let bytes: Vec<u8> = csv.write_all(&records).await?;
-
-// Write to a file
-csv.write_file(“output.csv”, &records).await?;
-```
-
-#### Streaming (memory-efficient)
-
-```rust
-// Record-by-record reading
-let mut stream = csv.reader_from_file(“large.csv”).await?;
-while let Some(result) = stream.next_deserialized::<Record>().await {
-    let record = result?;
-    // process one record at a time
-}
-
-// Record-by-record writing
-let mut writer = csv.writer_to_file(“output.csv”).await?;
-writer.serialize(&Output { name: “Alice”.into(), score: 95.5 }).await?;
-writer.write_fields([“Bob”, “87.0”]).await?;
-writer.finish().await?;
-```
-
+[MIT](LICENSE)
