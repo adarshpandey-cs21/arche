@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod aws;
 pub(crate) mod config;
 pub mod crypto;
@@ -7,6 +8,7 @@ pub mod error;
 pub mod gcp;
 pub mod json;
 pub mod jwt;
+pub mod llm;
 pub mod sockets;
 pub mod utils;
 

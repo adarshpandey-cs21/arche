@@ -1,18 +1,17 @@
 mod client;
 mod config;
 mod providers;
-pub mod types;
 
-pub use client::VertexClient;
+pub use client::{VertexClient, VertexProvider};
 pub use config::VertexConfig;
-pub use types::*;
 
 use crate::error::AppError;
 
 pub async fn get_vertex_client(
-    config: impl Into<Option<VertexConfig>>,
+    provider: VertexProvider,
+    config: Option<VertexConfig>,
 ) -> Result<VertexClient, AppError> {
-    let auth = config::resolve_auth(config.into()).await?;
+    let auth = config::resolve_auth(config).await?;
     let http = reqwest::Client::new();
-    Ok(VertexClient::new(http, auth))
+    Ok(VertexClient::new(http, auth, provider))
 }

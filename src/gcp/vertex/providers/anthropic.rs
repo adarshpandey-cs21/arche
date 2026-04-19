@@ -1,12 +1,12 @@
 use crate::error::AppError;
 use crate::gcp::vertex::client::VertexClient;
 use crate::gcp::vertex::config::ResolvedAuth;
-use crate::gcp::vertex::types::*;
+use crate::llm::{
+    ContentPart, GenerateRequest, GenerateResponse, ParameterSchema, Role, StreamChunk, Usage,
+};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-
-// --- Wire types ---
 
 #[derive(Serialize)]
 struct Request {
@@ -62,7 +62,7 @@ enum ContentBlock {
 struct WireToolDef {
     name: String,
     description: String,
-    input_schema: serde_json::Value,
+    input_schema: ParameterSchema,
 }
 
 #[derive(Deserialize)]
@@ -78,13 +78,29 @@ struct WireUsage {
     output_tokens: u32,
 }
 
+impl From<WireUsage> for Usage {
+    fn from(u: WireUsage) -> Self {
+        Usage {
+            input_tokens: Some(u.input_tokens),
+            output_tokens: Some(u.output_tokens),
+            total_tokens: Some(u.input_tokens.saturating_add(u.output_tokens)),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum StreamEvent {
     #[serde(rename = "message_start")]
-    MessageStart {},
+    MessageStart {
+        #[serde(default)]
+        message: Option<StreamMessageInit>,
+    },
     #[serde(rename = "content_block_start")]
-    ContentBlockStart {},
+    ContentBlockStart {
+        #[serde(default)]
+        content_block: Option<ContentBlockInfo>,
+    },
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { delta: Delta },
     #[serde(rename = "content_block_stop")]
@@ -98,23 +114,35 @@ enum StreamEvent {
 }
 
 #[derive(Deserialize)]
+struct StreamMessageInit {
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ContentBlockInfo {
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(rename = "text")]
+    Text {},
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Delta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
     #[serde(rename = "input_json_delta")]
-    InputJsonDelta {
-        #[allow(dead_code)]
-        partial_json: String,
-    },
+    InputJsonDelta { partial_json: String },
 }
 
 #[derive(Deserialize)]
 struct MessageDeltaBody {
     stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
 }
-
-// --- Public API ---
 
 pub(crate) async fn generate(
     client: &VertexClient,
@@ -153,8 +181,6 @@ pub(crate) async fn stream_generate(
     Ok(parse_sse(resp))
 }
 
-// --- Endpoint ---
-
 fn endpoint(auth: &ResolvedAuth, model: &str, stream: bool) -> Result<String, AppError> {
     let method = if stream {
         "streamRawPredict"
@@ -170,13 +196,18 @@ fn endpoint(auth: &ResolvedAuth, model: &str, stream: bool) -> Result<String, Ap
             project_id,
             region,
             ..
-        } => Ok(format!(
-            "https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{method}"
-        )),
+        } => {
+            let host = if region == "global" {
+                "aiplatform.googleapis.com".to_string()
+            } else {
+                format!("{region}-aiplatform.googleapis.com")
+            };
+            Ok(format!(
+                "https://{host}/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{method}"
+            ))
+        }
     }
 }
-
-// --- Conversion ---
 
 fn to_wire(req: &GenerateRequest) -> Request {
     let messages = req
@@ -194,15 +225,20 @@ fn to_wire(req: &GenerateRequest) -> Request {
         })
         .collect();
 
-    let tools = req.tools.as_ref().map(|defs| {
-        defs.iter()
-            .map(|t| WireToolDef {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.parameters.clone(),
-            })
-            .collect()
-    });
+    let tools = if req.tools.is_empty() {
+        None
+    } else {
+        Some(
+            req.tools
+                .iter()
+                .map(|t| WireToolDef {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input_schema: t.parameters.clone(),
+                })
+                .collect(),
+        )
+    };
 
     Request {
         anthropic_version: "vertex-2023-10-16".into(),
@@ -237,10 +273,20 @@ fn to_blocks(parts: &[ContentPart]) -> Vec<ContentBlock> {
                 ..
             } => ContentBlock::ToolResult {
                 tool_use_id: tool_call_id.clone(),
-                content: content.to_string(),
+                content: value_to_tool_result_string(content),
             },
         })
         .collect()
+}
+
+/// Anthropic's `tool_result.content` is a raw string. If our canonical content is
+/// a JSON string, unwrap it (`Value::String("hi")` → `hi`). Any other JSON value
+/// is serialized as-is so the model sees valid JSON.
+fn value_to_tool_result_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn from_wire(resp: Response) -> GenerateResponse {
@@ -258,39 +304,41 @@ fn from_wire(resp: Response) -> GenerateResponse {
         })
         .collect();
 
-    let usage = resp.usage.map(|u| Usage {
-        input_tokens: Some(u.input_tokens),
-        output_tokens: Some(u.output_tokens),
-        total_tokens: Some(u.input_tokens + u.output_tokens),
-    });
-
     GenerateResponse {
         content,
         stop_reason: resp.stop_reason,
-        usage,
+        usage: resp.usage.map(Usage::from),
     }
 }
-
-// --- SSE parser ---
 
 fn parse_sse(
     resp: reqwest::Response,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, AppError>> + Send>> {
     let stream = async_stream::stream! {
         let mut byte_stream = futures::StreamExt::fuse(resp.bytes_stream());
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
+
+        let mut current_tool_id = String::new();
+        let mut current_tool_name = String::new();
+        let mut current_tool_json = String::new();
+
+        let mut input_usage: Option<u32> = None;
+        let mut output_usage: Option<u32> = None;
+        let mut done_sent = false;
 
         while let Some(chunk) = futures::StreamExt::next(&mut byte_stream).await {
             let bytes = chunk.map_err(|e| {
                 AppError::dependency_failed("vertex-ai", format!("Stream read error: {e}"))
             })?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            buffer.extend_from_slice(&bytes);
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+            while let Some((pos, sep_len)) = find_frame_boundary(&buffer) {
+                let frame = buffer.drain(..pos + sep_len).collect::<Vec<u8>>();
+                let Ok(event_block) = std::str::from_utf8(&frame[..frame.len() - sep_len]) else {
+                    tracing::debug!("Anthropic SSE frame was not valid UTF-8");
+                    continue;
+                };
 
-                // Anthropic SSE uses `event: <type>\ndata: <json>` — extract the data line
                 let mut data_line = None;
                 for line in event_block.lines() {
                     if let Some(d) = line.strip_prefix("data: ") {
@@ -298,33 +346,77 @@ fn parse_sse(
                     }
                 }
 
-                let Some(data) = data_line else {
-                    continue;
-                };
+                let Some(data) = data_line else { continue };
 
                 match serde_json::from_str::<StreamEvent>(data) {
                     Ok(event) => match event {
-                        StreamEvent::ContentBlockDelta { delta: Delta::TextDelta { text }, .. } => {
+                        StreamEvent::MessageStart { message } => {
+                            if let Some(m) = message
+                                && let Some(u) = m.usage
+                            {
+                                input_usage = Some(u.input_tokens);
+                                output_usage = Some(u.output_tokens);
+                            }
+                        }
+                        StreamEvent::ContentBlockStart { content_block } => {
+                            if let Some(ContentBlockInfo::ToolUse { id, name }) = content_block {
+                                current_tool_id = id;
+                                current_tool_name = name;
+                                current_tool_json.clear();
+                            }
+                        }
+                        StreamEvent::ContentBlockDelta {
+                            delta: Delta::TextDelta { text },
+                        } => {
                             yield Ok(StreamChunk::Text(text));
                         }
-                        StreamEvent::MessageDelta { delta, .. } => {
-                            if let Some(reason) = delta.stop_reason {
+                        StreamEvent::ContentBlockDelta {
+                            delta: Delta::InputJsonDelta { partial_json },
+                        } => {
+                            current_tool_json.push_str(&partial_json);
+                        }
+                        StreamEvent::ContentBlockStop {} => {
+                            if !current_tool_name.is_empty() {
+                                let arguments = if current_tool_json.is_empty() {
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                } else {
+                                    serde_json::from_str(&current_tool_json)
+                                        .unwrap_or(serde_json::Value::Null)
+                                };
+                                yield Ok(StreamChunk::ToolCall {
+                                    id: std::mem::take(&mut current_tool_id),
+                                    name: std::mem::take(&mut current_tool_name),
+                                    arguments,
+                                });
+                                current_tool_json.clear();
+                            }
+                        }
+                        StreamEvent::MessageDelta { delta } => {
+                            if let Some(u) = delta.usage {
+                                input_usage = input_usage.or(Some(u.input_tokens));
+                                output_usage = Some(u.output_tokens);
+                            }
+                            if !done_sent && let Some(reason) = delta.stop_reason {
                                 yield Ok(StreamChunk::Done {
                                     finish_reason: reason,
+                                    usage: final_usage(input_usage, output_usage),
                                 });
+                                done_sent = true;
                             }
                         }
                         StreamEvent::MessageStop => {
-                            yield Ok(StreamChunk::Done {
-                                finish_reason: "end_turn".into(),
-                            });
+                            if !done_sent {
+                                yield Ok(StreamChunk::Done {
+                                    finish_reason: "end_turn".into(),
+                                    usage: final_usage(input_usage, output_usage),
+                                });
+                                done_sent = true;
+                            }
                         }
-                        _ => {}
+                        StreamEvent::Ping => {}
                     },
                     Err(e) => {
-                        tracing::debug!(
-                            "Failed to parse Anthropic SSE chunk: {e}, data: {data}"
-                        );
+                        tracing::debug!("Failed to parse Anthropic SSE chunk: {e}, data: {data}");
                     }
                 }
             }
@@ -332,4 +424,93 @@ fn parse_sse(
     };
 
     Box::pin(stream)
+}
+
+fn final_usage(input: Option<u32>, output: Option<u32>) -> Option<Usage> {
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let total_tokens = input.zip(output).map(|(a, b)| a.saturating_add(b));
+    Some(Usage {
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens,
+    })
+}
+
+fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    match (crlf, lf) {
+        (Some(c), Some(l)) => {
+            if c <= l {
+                Some((c, 4))
+            } else {
+                Some((l, 2))
+            }
+        }
+        (Some(c), None) => Some((c, 4)),
+        (None, Some(l)) => Some((l, 2)),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_to_tool_result_string_unwraps_json_string() {
+        let v = serde_json::Value::String("hello".into());
+        assert_eq!(value_to_tool_result_string(&v), "hello");
+    }
+
+    #[test]
+    fn value_to_tool_result_string_serializes_object() {
+        let v = serde_json::json!({"count": 3});
+        let out = value_to_tool_result_string(&v);
+        assert!(out.contains("\"count\""));
+        assert!(out.contains("3"));
+    }
+
+    #[test]
+    fn to_blocks_tool_result_sends_raw_string_to_anthropic() {
+        let parts = vec![ContentPart::ToolResult {
+            tool_call_id: "t1".into(),
+            name: "search".into(),
+            content: serde_json::Value::String("raw text".into()),
+        }];
+        let blocks = to_blocks(&parts);
+        match &blocks[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, "raw text");
+            }
+            _ => panic!("expected tool_result block"),
+        }
+    }
+
+    #[test]
+    fn final_usage_none_when_both_missing() {
+        assert!(final_usage(None, None).is_none());
+    }
+
+    #[test]
+    fn final_usage_sums_when_both_present() {
+        let u = final_usage(Some(10), Some(5)).unwrap();
+        assert_eq!(u.input_tokens, Some(10));
+        assert_eq!(u.output_tokens, Some(5));
+        assert_eq!(u.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn find_frame_boundary_lf() {
+        let b = b"event: x\ndata: hi\n\nnext";
+        assert_eq!(find_frame_boundary(b), Some((17, 2)));
+    }
+
+    #[test]
+    fn find_frame_boundary_crlf() {
+        let b = b"event: x\r\ndata: hi\r\n\r\nnext";
+        assert_eq!(find_frame_boundary(b), Some((18, 4)));
+    }
 }

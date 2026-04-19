@@ -8,8 +8,8 @@
 [![Documentation](https://img.shields.io/docsrs/arche)](https://docs.rs/arche)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cloud integrations, databases, auth, LLM inference, encryption, streaming JSON/CSV,
-WebSockets, and structured error handling — wired up and ready to go.
+Cloud integrations, databases, auth, LLM inference, tool-calling agents, encryption,
+streaming JSON/CSV, WebSockets, and structured error handling — wired up and ready to go.
 
 `arche` sits *around* Axum, not in place of it.
 
@@ -32,7 +32,7 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "2.3.0"
+arche = "2.5.0"
 ```
 
 ## Modules
@@ -41,6 +41,8 @@ arche = "2.3.0"
 |---|---|
 | [`aws`](#aws) | S3, SES, and KMS via official AWS SDKs |
 | [`gcp`](#gcp) | Google Drive, Sheets, and **Vertex AI** (Gemini + Claude) |
+| [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
+| [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
 | [`database`](#database) | Postgres and Redis connection pooling with health checks |
 | [`jwt`](#jwt) | HS256 token generation, verification, and expiry helpers |
 | [`csv`](#csv) | Async CSV read/write — batch, streaming, and from URL |
@@ -181,26 +183,26 @@ let sheets = get_sheets_client(None).await?;
 
 #### Vertex AI
 
-Unified LLM client for **Gemini** and **Anthropic Claude** models on Google Cloud.
-Supports both streaming and non-streaming inference, function calling, and flexible
-authentication (API key for Gemini, service account for both providers).
+`VertexClient` implements [`arche::llm::LlmProvider`](#llm) for **Gemini** and
+**Anthropic Claude** models on Google Cloud. The provider (Gemini or Anthropic) is
+captured at construction; the model is specified per-request.
 
 ```rust
-use arche::gcp::vertex::{
-    get_vertex_client, VertexConfig,
-    GenerateRequest, Message, Provider, StreamChunk,
-};
+use arche::gcp::vertex::{get_vertex_client, VertexConfig, VertexProvider};
+use arche::llm::{GenerateRequest, LlmProvider, Message, StreamChunk};
 
-// From env vars
-let client = get_vertex_client(None).await?;
+// Create a client bound to Gemini
+let client = get_vertex_client(VertexProvider::Gemini, None).await?;
 
-// Or with explicit config
+// Or with explicit config (Anthropic requires service account auth)
 let client = get_vertex_client(
-    VertexConfig::default().with_api_key("your-api-key")
+    VertexProvider::Anthropic,
+    Some(VertexConfig::default()
+        .with_project_id("my-project")
+        .with_region("us-east5")),
 ).await?;
 
 let request = GenerateRequest::new(
-    Provider::Gemini,
     "gemini-2.0-flash",
     vec![Message::user("Explain quantum computing in one sentence.")],
 )
@@ -209,47 +211,46 @@ let request = GenerateRequest::new(
 .with_temperature(0.7);
 
 // Non-streaming
-let response = client.generate(request).await?;
-println!("{}", response.text().unwrap());
+let response = client.generate(&request).await?;
+println!("{}", response.text().unwrap_or_default());
 println!("Tokens: {:?}", response.usage);
 
 // Streaming
 use futures::StreamExt;
 
-let mut stream = client.stream_generate(request).await?;
+let mut stream = client.stream_generate(&request).await?;
 while let Some(chunk) = stream.next().await {
     match chunk? {
         StreamChunk::Text(text) => print!("{text}"),
-        StreamChunk::Done { finish_reason } => println!("\n[{finish_reason}]"),
+        StreamChunk::ToolCall { name, arguments, .. } => { /* dispatch tool */ }
+        StreamChunk::Done { finish_reason, usage } => {
+            println!("\n[{finish_reason}] usage={usage:?}");
+        }
     }
 }
 ```
 
-**Function calling:**
+**Function calling** (typed schemas via `arche::llm::ParameterSchema`):
 
 ```rust
-use arche::gcp::vertex::ToolDefinition;
+use arche::llm::{ParameterSchema, ToolDefinition};
 
-let tools = vec![ToolDefinition {
-    name: "get_weather".into(),
-    description: "Get current weather for a city".into(),
-    parameters: serde_json::json!({
-        "type": "object",
-        "properties": {
-            "city": { "type": "string" }
-        },
-        "required": ["city"]
-    }),
-}];
+let tools = vec![
+    ToolDefinition::new("get_weather", "Get current weather for a city")
+        .with_parameters(
+            ParameterSchema::object()
+                .with_property("city", ParameterSchema::string("City name"))
+                .with_required(["city"]),
+        ),
+];
 
 let request = GenerateRequest::new(
-    Provider::Gemini,
     "gemini-2.0-flash",
     vec![Message::user("What's the weather in Tokyo?")],
 )
 .with_tools(tools);
 
-let response = client.generate(request).await?;
+let response = client.generate(&request).await?;
 for call in response.tool_calls() {
     // Handle tool calls
 }
@@ -258,14 +259,13 @@ for call in response.tool_calls() {
 **Using Claude on Vertex AI** (requires service account auth):
 
 ```rust
+let client = get_vertex_client(VertexProvider::Anthropic, None).await?;
 let request = GenerateRequest::new(
-    Provider::Anthropic,
     "claude-sonnet-4-20250514",
     vec![Message::user("Hello, Claude!")],
 )
 .with_max_tokens(1024);
-
-let response = client.generate(request).await?;
+let response = client.generate(&request).await?;
 ```
 
 **Authentication:**
@@ -277,6 +277,139 @@ let response = client.generate(request).await?;
 
 If an API key is present, it takes priority. Service account auth is required for
 Anthropic models. Default region: `asia-south1`.
+
+---
+
+### LLM
+
+Canonical, provider-agnostic types and the `LlmProvider` trait that every backend
+implements. Use it directly when you just want to call an LLM; build on top of it
+when you want tool-calling orchestration (see [`agent`](#agent)).
+
+```rust
+use arche::llm::{GenerateRequest, LlmProvider, Message, ParameterSchema, ToolDefinition};
+
+// `client` is anything implementing `LlmProvider` —
+// VertexClient, or your own OpenAi/Bedrock/Ollama/local impl.
+let request = GenerateRequest::new(
+    "gemini-2.0-flash",
+    vec![Message::user("Hello!")],
+)
+.with_system("Be concise.")
+.with_temperature(0.3);
+
+let response = client.generate(&request).await?;
+```
+
+**Types you'll use:**
+
+| Type | Purpose |
+|---|---|
+| `LlmProvider` (trait) | `generate()` + `stream_generate()` on a canonical `GenerateRequest`. Implement this to add a backend. |
+| `GenerateRequest` / `GenerateResponse` | Canonical request/response, provider-neutral |
+| `Message`, `Role`, `ContentPart` | Conversation turns — text, tool calls, tool results |
+| `StreamChunk` | `Text(String)` \| `ToolCall { id, name, arguments }` \| `Done { finish_reason, usage }` |
+| `ToolDefinition` + `ParameterSchema` | Strictly-typed tool descriptions; serializes to valid JSON Schema |
+| `Usage` | Token accounting (input/output/total) |
+
+**Writing a custom backend:**
+
+```rust
+use arche::llm::{GenerateRequest, GenerateResponse, LlmProvider, LlmStream};
+use arche::error::AppError;
+use std::future::Future;
+use std::pin::Pin;
+
+pub struct OpenAiClient { /* http client, api key */ }
+
+impl LlmProvider for OpenAiClient {
+    fn generate<'a>(&'a self, request: &'a GenerateRequest)
+        -> Pin<Box<dyn Future<Output = Result<GenerateResponse, AppError>> + Send + 'a>>
+    { Box::pin(async move { /* POST, convert */ todo!() }) }
+
+    fn stream_generate<'a>(&'a self, request: &'a GenerateRequest)
+        -> Pin<Box<dyn Future<Output = Result<LlmStream, AppError>> + Send + 'a>>
+    { Box::pin(async move { /* POST stream, convert SSE */ todo!() }) }
+}
+```
+
+Drops into `arche::agent::get_agent_engine(my_client, config)` with no other changes.
+
+---
+
+### Agent
+
+Tool-calling agent engine: orchestrates LLM rounds, invokes your tools, streams SSE
+events to the client, manages session history (with optional compaction).
+
+```rust
+use arche::agent::{get_agent_engine, AgentConfig, AgentFlow, AgentSession, ToolOutput, to_sse_event};
+use arche::gcp::vertex::{get_vertex_client, VertexProvider};
+use arche::llm::{ParameterSchema, ToolDefinition};
+
+struct ShoppingFlow;
+
+impl AgentFlow for ShoppingFlow {
+    fn system_prompt(&self) -> String {
+        "You help shoppers find products.".into()
+    }
+
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new("search_catalog", "Search products by query")
+                .with_parameters(
+                    ParameterSchema::object()
+                        .with_property("query", ParameterSchema::string("Query"))
+                        .with_required(["query"]),
+                ),
+        ]
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a serde_json::Value,
+        _session: &'a AgentSession,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput, arche::error::AppError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Run your business logic, return text for the LLM + optional data for the client
+            Ok(ToolOutput::text("Found 3 matches")
+                .data("product_list", serde_json::json!([/* ... */])))
+        })
+    }
+}
+
+// Wire it up
+let client = get_vertex_client(VertexProvider::Gemini, None).await?;
+let config = AgentConfig::builder("gemini-2.0-flash").build()?;
+let engine = get_agent_engine(client, config)
+    .with_default_summarizer("gemini-2.0-flash-lite"); // optional, cheap summarization
+
+// Per request
+let mut session = AgentSession::new("sess-1", "shopping");
+let stream = engine.run(&ShoppingFlow, &mut session, "find red shoes");
+// Map each SseEvent via `to_sse_event(..)` to an axum SSE Event.
+```
+
+**What arche provides vs. what you write:**
+
+| Arche provides | You write |
+|---|---|
+| Orchestration loop, streaming, SSE event types, session mutation, tool-calling loop, history compaction | System prompt, tool schemas, tool executors (`impl AgentFlow`), HTTP handler, session persistence |
+
+**Extension points:**
+
+| Need | Plug point |
+|---|---|
+| Different LLM backend | `impl LlmProvider for YourClient` |
+| Custom history compaction (vector recall, server-side memory) | `impl HistoryCompactor` |
+| Custom UI events from tools | `ToolOutput::text(..).data(type, payload)` → reaches client via `SseEvent::Data` |
+
+**Deeper reading:**
+
+- [`docs/agent/architecture.md`](docs/agent/architecture.md) — module layering, component diagram with hover tooltips
+- [`docs/agent/sequence.md`](docs/agent/sequence.md) — request lifecycle, error paths, SSE wire format
+- [`docs/agent/extending.md`](docs/agent/extending.md) — step-by-step guides for each plug point
 
 ---
 
@@ -551,7 +684,7 @@ async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
 details. Enable `verbose-errors` to expose raw error details (dev/staging only):
 
 ```toml
-arche = { version = "2.3.0", features = ["verbose-errors"] }
+arche = { version = "2.5.0", features = ["verbose-errors"] }
 ```
 
 ---

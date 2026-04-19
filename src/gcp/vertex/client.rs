@@ -1,35 +1,28 @@
 use crate::error::AppError;
-use futures::Stream;
+use crate::llm::{GenerateRequest, GenerateResponse, LlmProvider, LlmStream};
 use std::pin::Pin;
 
 use super::config::ResolvedAuth;
 use super::providers;
-use super::types::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VertexProvider {
+    Gemini,
+    Anthropic,
+}
 
 pub struct VertexClient {
     pub(crate) http: reqwest::Client,
     pub(crate) auth: ResolvedAuth,
+    pub(crate) provider: VertexProvider,
 }
 
 impl VertexClient {
-    pub(crate) fn new(http: reqwest::Client, auth: ResolvedAuth) -> Self {
-        Self { http, auth }
-    }
-
-    pub async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AppError> {
-        match &request.provider {
-            Provider::Gemini => providers::gemini::generate(self, request).await,
-            Provider::Anthropic => providers::anthropic::generate(self, request).await,
-        }
-    }
-
-    pub async fn stream_generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, AppError>> + Send>>, AppError> {
-        match &request.provider {
-            Provider::Gemini => providers::gemini::stream_generate(self, request).await,
-            Provider::Anthropic => providers::anthropic::stream_generate(self, request).await,
+    pub(crate) fn new(http: reqwest::Client, auth: ResolvedAuth, provider: VertexProvider) -> Self {
+        Self {
+            http,
+            auth,
+            provider,
         }
     }
 
@@ -77,5 +70,34 @@ impl VertexClient {
         }
 
         Ok(resp)
+    }
+}
+
+impl LlmProvider for VertexClient {
+    fn generate<'a>(
+        &'a self,
+        request: &'a GenerateRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<GenerateResponse, AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match self.provider {
+                VertexProvider::Gemini => providers::gemini::generate(self, request).await,
+                VertexProvider::Anthropic => providers::anthropic::generate(self, request).await,
+            }
+        })
+    }
+
+    fn stream_generate<'a>(
+        &'a self,
+        request: &'a GenerateRequest,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<LlmStream, AppError>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.provider {
+                VertexProvider::Gemini => providers::gemini::stream_generate(self, request).await,
+                VertexProvider::Anthropic => {
+                    providers::anthropic::stream_generate(self, request).await
+                }
+            }
+        })
     }
 }
