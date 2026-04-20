@@ -24,20 +24,22 @@ struct Content {
     parts: Vec<Part>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum Part {
-    Text {
-        text: String,
-    },
-    FunctionCall {
-        #[serde(rename = "functionCall")]
-        function_call: FnCall,
-    },
-    FunctionResponse {
-        #[serde(rename = "functionResponse")]
-        function_response: FnResponse,
-    },
+/// Thinking models emit `thoughtSignature` on a separate thought Part that may
+/// precede (non-streaming) or follow (streaming) the function_call Part. All
+/// fields optional so any Part shape deserializes.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Part {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    function_call: Option<FnCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    function_response: Option<FnResponse>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,6 +78,16 @@ struct GenConfig {
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+/// Gemini 2.5+ thinking config. Setting `thinking_budget: 0` disables thinking
+/// and avoids the `thought_signature` requirement on function_call parts.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThinkingConfig {
+    thinking_budget: u32,
 }
 
 #[derive(Deserialize)]
@@ -187,20 +199,34 @@ fn to_wire(req: &GenerateRequest) -> Request {
                 .content
                 .iter()
                 .map(|p| match p {
-                    ContentPart::Text(text) => Part::Text { text: text.clone() },
+                    ContentPart::Text(text) => Part {
+                        text: Some(text.clone()),
+                        ..Default::default()
+                    },
                     ContentPart::ToolCall {
-                        name, arguments, ..
-                    } => Part::FunctionCall {
-                        function_call: FnCall {
+                        name,
+                        arguments,
+                        thought_signature,
+                        ..
+                    } => Part {
+                        function_call: Some(FnCall {
                             name: name.clone(),
                             args: arguments.clone(),
-                        },
+                        }),
+                        thought_signature: thought_signature.clone(),
+                        ..Default::default()
                     },
-                    ContentPart::ToolResult { name, content, .. } => Part::FunctionResponse {
-                        function_response: FnResponse {
+                    ContentPart::ToolResult { name, content, .. } => Part {
+                        function_response: Some(FnResponse {
                             name: name.clone(),
-                            response: content.clone(),
-                        },
+                            // Gemini requires a Struct here; wrap primitives.
+                            response: if content.is_object() {
+                                content.clone()
+                            } else {
+                                serde_json::json!({ "result": content })
+                            },
+                        }),
+                        ..Default::default()
                     },
                 })
                 .collect(),
@@ -209,7 +235,10 @@ fn to_wire(req: &GenerateRequest) -> Request {
 
     let system_instruction = req.system.as_ref().map(|s| Content {
         role: "user".into(),
-        parts: vec![Part::Text { text: s.clone() }],
+        parts: vec![Part {
+            text: Some(s.clone()),
+            ..Default::default()
+        }],
     });
 
     let generation_config = if req.max_tokens.is_some()
@@ -222,6 +251,7 @@ fn to_wire(req: &GenerateRequest) -> Request {
             temperature: req.temperature,
             top_p: req.top_p,
             top_k: req.top_k,
+            thinking_config: None,
         })
     } else {
         None
@@ -260,19 +290,22 @@ fn from_wire(resp: Response) -> GenerateResponse {
     {
         stop_reason = candidate.finish_reason.clone();
         if let Some(c) = &candidate.content {
+            let mut pending_signature: Option<String> = None;
             for part in &c.parts {
-                match part {
-                    Part::Text { text } => {
-                        content.push(ContentPart::Text(text.clone()));
-                    }
-                    Part::FunctionCall { function_call } => {
-                        content.push(ContentPart::ToolCall {
-                            id: nanoid::nanoid!(),
-                            name: function_call.name.clone(),
-                            arguments: function_call.args.clone(),
-                        });
-                    }
-                    Part::FunctionResponse { .. } => {}
+                if let Some(sig) = &part.thought_signature {
+                    pending_signature = Some(sig.clone());
+                }
+                if let Some(fc) = &part.function_call {
+                    content.push(ContentPart::ToolCall {
+                        id: nanoid::nanoid!(),
+                        name: fc.name.clone(),
+                        arguments: fc.args.clone(),
+                        thought_signature: pending_signature.take(),
+                    });
+                } else if part.thought != Some(true)
+                    && let Some(text) = &part.text
+                {
+                    content.push(ContentPart::Text(text.clone()));
                 }
             }
         }
@@ -293,6 +326,8 @@ fn parse_sse(
         let mut buffer: Vec<u8> = Vec::new();
         let mut latest_usage: Option<Usage> = None;
         let mut done_sent = false;
+        let mut pending_signature: Option<String> = None;
+        let mut buffered_tool_calls: Vec<(String, serde_json::Value)> = Vec::new();
 
         while let Some(chunk) = futures::StreamExt::next(&mut byte_stream).await {
             let bytes = chunk.map_err(|e| {
@@ -313,6 +348,15 @@ fn parse_sse(
 
                 if data.trim() == "[DONE]" {
                     if !done_sent {
+                        let sig = pending_signature.take();
+                        for (name, args) in buffered_tool_calls.drain(..) {
+                            yield Ok(StreamChunk::ToolCall {
+                                id: nanoid::nanoid!(),
+                                name,
+                                arguments: args,
+                                thought_signature: sig.clone(),
+                            });
+                        }
                         yield Ok(StreamChunk::Done {
                             finish_reason: "STOP".into(),
                             usage: latest_usage.take(),
@@ -331,18 +375,15 @@ fn parse_sse(
                         for candidate in candidates {
                             if let Some(content) = candidate.content {
                                 for part in content.parts {
-                                    match part {
-                                        Part::Text { text } => {
-                                            yield Ok(StreamChunk::Text(text));
-                                        }
-                                        Part::FunctionCall { function_call } => {
-                                            yield Ok(StreamChunk::ToolCall {
-                                                id: nanoid::nanoid!(),
-                                                name: function_call.name,
-                                                arguments: function_call.args,
-                                            });
-                                        }
-                                        Part::FunctionResponse { .. } => {}
+                                    if let Some(sig) = part.thought_signature {
+                                        pending_signature = Some(sig);
+                                    }
+                                    if let Some(fc) = part.function_call {
+                                        buffered_tool_calls.push((fc.name, fc.args));
+                                    } else if part.thought != Some(true)
+                                        && let Some(text) = part.text
+                                    {
+                                        yield Ok(StreamChunk::Text(text));
                                     }
                                 }
                             }
@@ -350,6 +391,15 @@ fn parse_sse(
                                 && let Some(reason) = candidate.finish_reason
                                 && (reason == "STOP" || reason == "MAX_TOKENS")
                             {
+                                let sig = pending_signature.take();
+                                for (name, args) in buffered_tool_calls.drain(..) {
+                                    yield Ok(StreamChunk::ToolCall {
+                                        id: nanoid::nanoid!(),
+                                        name,
+                                        arguments: args,
+                                        thought_signature: sig.clone(),
+                                    });
+                                }
                                 yield Ok(StreamChunk::Done {
                                     finish_reason: reason,
                                     usage: latest_usage.take(),

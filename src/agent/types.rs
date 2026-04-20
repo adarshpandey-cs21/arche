@@ -61,6 +61,7 @@ pub enum SseEvent {
     ToolStatus {
         tool: String,
         status: ToolCallStatus,
+        label: Option<String>,
     },
     Data {
         r#type: String,
@@ -120,6 +121,9 @@ pub enum ChatMessage {
         id: String,
         name: String,
         args: serde_json::Value,
+        /// Used by Gemini 2.5+ thinking models. Other providers serialize this as absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_call_id: String,
@@ -154,6 +158,7 @@ mod tests {
             id: "t1".into(),
             name: "search".into(),
             args: serde_json::json!({"q": "x"}),
+            thought_signature: None,
         };
         let json = serde_json::to_value(&tool).unwrap();
         assert_eq!(json["kind"], "tool_call");

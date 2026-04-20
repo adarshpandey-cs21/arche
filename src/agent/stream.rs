@@ -6,15 +6,23 @@ pub fn to_sse_event(event: SseEvent) -> sse::Event {
     match event {
         SseEvent::Text { delta } => sse::Event::default().event("text").data(delta),
 
-        SseEvent::ToolStatus { tool, status } => {
+        SseEvent::ToolStatus {
+            tool,
+            status,
+            label,
+        } => {
             let status_str = match status {
                 ToolCallStatus::Calling => "calling",
                 ToolCallStatus::Done => "done",
                 ToolCallStatus::Error => "error",
             };
+            let mut body = serde_json::json!({ "tool": tool, "status": status_str });
+            if let Some(l) = label {
+                body["label"] = serde_json::Value::String(l);
+            }
             sse::Event::default()
                 .event("tool_status")
-                .data(serde_json::json!({ "tool": tool, "status": status_str }).to_string())
+                .data(body.to_string())
         }
 
         SseEvent::Data { r#type, payload } => sse::Event::default()

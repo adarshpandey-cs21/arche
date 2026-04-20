@@ -102,12 +102,18 @@ impl AgentEngine {
                             full_text.push_str(&text);
                             yield Ok(SseEvent::Text { delta: text });
                         }
-                        Ok(StreamChunk::ToolCall { id, name, arguments }) => {
+                        Ok(StreamChunk::ToolCall { id, name, arguments, thought_signature }) => {
                             got_tool_call = true;
+
+                            let label = arguments
+                                .get("doing")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
 
                             yield Ok(SseEvent::ToolStatus {
                                 tool: name.clone(),
                                 status: ToolCallStatus::Calling,
+                                label: label.clone(),
                             });
 
                             let tool_output = match flow
@@ -119,6 +125,7 @@ impl AgentEngine {
                                     yield Ok(SseEvent::ToolStatus {
                                         tool: name.clone(),
                                         status: ToolCallStatus::Error,
+                                        label: label.clone(),
                                     });
                                     yield Ok(SseEvent::Error {
                                         code: "tool_error".into(),
@@ -148,6 +155,7 @@ impl AgentEngine {
                                 id: id.clone(),
                                 name: name.clone(),
                                 args: arguments,
+                                thought_signature,
                             });
                             session.messages.push(ChatMessage::ToolResult {
                                 tool_call_id: id,
@@ -158,6 +166,7 @@ impl AgentEngine {
                             yield Ok(SseEvent::ToolStatus {
                                 tool: name,
                                 status: ToolCallStatus::Done,
+                                label,
                             });
                         }
                         Ok(StreamChunk::Done { .. }) => {}
@@ -208,9 +217,17 @@ fn session_to_llm_messages(messages: &[ChatMessage]) -> Vec<llm::Message> {
         .map(|msg| match msg {
             ChatMessage::User { content } => llm::Message::user(content),
             ChatMessage::Assistant { content } => llm::Message::assistant(content),
-            ChatMessage::ToolCall { id, name, args } => {
-                llm::Message::tool_call(id, name, args.clone())
-            }
+            ChatMessage::ToolCall {
+                id,
+                name,
+                args,
+                thought_signature,
+            } => llm::Message::tool_call_with_signature(
+                id,
+                name,
+                args.clone(),
+                thought_signature.clone(),
+            ),
             ChatMessage::ToolResult {
                 tool_call_id,
                 name,
@@ -356,6 +373,7 @@ mod tests {
             id: id.into(),
             name: "t".into(),
             args: serde_json::json!({}),
+            thought_signature: None,
         }
     }
     fn tr(id: &str) -> ChatMessage {

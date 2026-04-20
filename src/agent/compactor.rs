@@ -114,6 +114,7 @@ mod tests {
                 id: "t1".into(),
                 name: "search".into(),
                 args: serde_json::json!({"q": "red shoes"}),
+                thought_signature: None,
             },
             ChatMessage::ToolResult {
                 tool_call_id: "t1".into(),

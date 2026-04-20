@@ -20,6 +20,8 @@ pub enum ContentPart {
         id: String,
         name: String,
         arguments: serde_json::Value,
+        /// Used by Gemini 2.5+ thinking models (`thoughtSignature`). Other providers ignore.
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_call_id: String,
@@ -69,6 +71,24 @@ impl Message {
                 id: id.into(),
                 name: name.into(),
                 arguments,
+                thought_signature: None,
+            }],
+        }
+    }
+
+    pub fn tool_call_with_signature(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        thought_signature: Option<String>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: vec![ContentPart::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments,
+                thought_signature,
             }],
         }
     }
@@ -178,6 +198,8 @@ pub enum StreamChunk {
         id: String,
         name: String,
         arguments: serde_json::Value,
+        /// Used by Gemini 2.5+ thinking models (`thoughtSignature`). Other providers emit `None`.
+        thought_signature: Option<String>,
     },
     Done {
         finish_reason: String,

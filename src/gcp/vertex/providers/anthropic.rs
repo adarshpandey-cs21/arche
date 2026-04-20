@@ -262,6 +262,7 @@ fn to_blocks(parts: &[ContentPart]) -> Vec<ContentBlock> {
                 id,
                 name,
                 arguments,
+                ..
             } => ContentBlock::ToolUse {
                 id: id.clone(),
                 name: name.clone(),
@@ -299,6 +300,7 @@ fn from_wire(resp: Response) -> GenerateResponse {
                 id,
                 name,
                 arguments: input,
+                thought_signature: None,
             },
             ContentBlock::ToolResult { .. } => ContentPart::Text("[tool_result]".into()),
         })
@@ -387,6 +389,7 @@ fn parse_sse(
                                     id: std::mem::take(&mut current_tool_id),
                                     name: std::mem::take(&mut current_tool_name),
                                     arguments,
+                                    thought_signature: None,
                                 });
                                 current_tool_json.clear();
                             }
