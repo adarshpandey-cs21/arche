@@ -1,16 +1,16 @@
 use google_drive3::{
     DriveHub,
-    hyper_rustls::{self, HttpsConnector},
-    hyper_util::{self, client::legacy::connect::HttpConnector},
-    yup_oauth2::{self, ServiceAccountAuthenticator},
+    hyper_util::{self, client::legacy::Client},
+    yup_oauth2,
 };
 
 use crate::config::resolve_required_string;
 use crate::error::AppError;
+use crate::gcp::auth::{ProxiedConnector, build_proxy_aware_connector, build_sa_authenticator};
 
 pub use crate::config::gcp::{GcpDriveConfig, GcpDriveConfigBuilder};
 
-pub type GCPDriveClient = DriveHub<HttpsConnector<HttpConnector>>;
+pub type GCPDriveClient = DriveHub<ProxiedConnector>;
 
 #[allow(dead_code)]
 pub async fn get_drive_client(
@@ -24,7 +24,7 @@ pub async fn get_drive_client(
         "service_account_key_path",
     )?;
 
-    let auth = yup_oauth2::read_service_account_key(&gcp_drive_key)
+    let sa_key = yup_oauth2::read_service_account_key(&gcp_drive_key)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -41,40 +41,9 @@ pub async fn get_drive_client(
             )
         })?;
 
-    let authenticator = ServiceAccountAuthenticator::builder(auth)
-        .build()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                service = "google_drive",
-                "Failed to build authenticator"
-            );
-            AppError::internal_error(
-                format!("Failed to build GCP Drive authenticator: {}", e),
-                None,
-            )
-        })?;
-
-    let connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                service = "google_drive",
-                "Failed to build HTTPS connector"
-            );
-            AppError::internal_error(
-                format!("Failed to build HTTPS connector for GCP Drive: {}", e),
-                None,
-            )
-        })?
-        .https_or_http()
-        .enable_http1()
-        .build();
-
-    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build(connector);
+    let authenticator = build_sa_authenticator("google_drive", sa_key).await?;
+    let connector = build_proxy_aware_connector("google_drive")?;
+    let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(connector);
 
     Ok(DriveHub::new(client, authenticator))
 }

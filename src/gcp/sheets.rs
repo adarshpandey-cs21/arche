@@ -1,15 +1,16 @@
 use google_sheets4::{
-    Sheets, hyper_rustls, hyper_util,
-    yup_oauth2::{self, ServiceAccountAuthenticator},
+    Sheets,
+    hyper_util::{self, client::legacy::Client},
+    yup_oauth2,
 };
 
 use crate::config::resolve_required_string;
 use crate::error::AppError;
+use crate::gcp::auth::{ProxiedConnector, build_proxy_aware_connector, build_sa_authenticator};
 
 pub use crate::config::gcp::{GcpSheetsConfig, GcpSheetsConfigBuilder};
 
-pub type GCPSheetsClient =
-    Sheets<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>>;
+pub type GCPSheetsClient = Sheets<ProxiedConnector>;
 
 #[allow(dead_code)]
 pub async fn get_sheets_client(
@@ -23,7 +24,7 @@ pub async fn get_sheets_client(
         "service_account_key_path",
     )?;
 
-    let auth = yup_oauth2::read_service_account_key(&gcp_sheets_key)
+    let sa_key = yup_oauth2::read_service_account_key(&gcp_sheets_key)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -40,40 +41,9 @@ pub async fn get_sheets_client(
             )
         })?;
 
-    let authenticator = ServiceAccountAuthenticator::builder(auth)
-        .build()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                service = "google_sheets",
-                "Failed to build authenticator"
-            );
-            AppError::internal_error(
-                format!("Failed to build GCP Sheets authenticator: {}", e),
-                None,
-            )
-        })?;
-
-    let connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                service = "google_sheets",
-                "Failed to build HTTPS connector"
-            );
-            AppError::internal_error(
-                format!("Failed to build HTTPS connector for GCP Sheets: {}", e),
-                None,
-            )
-        })?
-        .https_or_http()
-        .enable_http1()
-        .build();
-
-    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build(connector);
+    let authenticator = build_sa_authenticator("google_sheets", sa_key).await?;
+    let connector = build_proxy_aware_connector("google_sheets")?;
+    let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(connector);
 
     Ok(Sheets::new(client, authenticator))
 }

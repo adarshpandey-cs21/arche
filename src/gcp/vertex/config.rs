@@ -1,8 +1,7 @@
 use crate::config::{resolve_optional, resolve_required, resolve_with_default};
 use crate::error::AppError;
-use google_drive3::{
-    hyper_rustls::HttpsConnector, hyper_util::client::legacy::connect::HttpConnector, yup_oauth2,
-};
+use crate::gcp::auth::{ProxiedAuthenticator, build_sa_authenticator};
+use google_drive3::yup_oauth2;
 
 #[derive(Debug, Clone, Default)]
 pub struct VertexConfig {
@@ -40,8 +39,7 @@ impl VertexConfig {
     }
 }
 
-pub(crate) type VertexAuthenticator =
-    yup_oauth2::authenticator::Authenticator<HttpsConnector<HttpConnector>>;
+pub(crate) type VertexAuthenticator = ProxiedAuthenticator;
 
 pub(crate) enum ResolvedAuth {
     ApiKey {
@@ -103,20 +101,7 @@ pub(crate) async fn resolve_auth(config: Option<VertexConfig>) -> Result<Resolve
                 })?
         };
 
-        let authenticator = yup_oauth2::ServiceAccountAuthenticator::builder(sa_key)
-            .build()
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    service = "vertex_ai",
-                    "Failed to build authenticator"
-                );
-                AppError::internal_error(
-                    format!("Failed to build Vertex AI authenticator: {e}"),
-                    None,
-                )
-            })?;
+        let authenticator = build_sa_authenticator("vertex_ai", sa_key).await?;
 
         return Ok(ResolvedAuth::ServiceAccount {
             project_id,
