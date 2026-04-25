@@ -40,7 +40,7 @@ arche = "2.5.0"
 | Module | What it does |
 |---|---|
 | [`aws`](#aws) | S3, SES, and KMS via official AWS SDKs |
-| [`gcp`](#gcp) | Google Drive, Sheets, and **Vertex AI** (Gemini + Claude) |
+| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude) wrappers for Sheets / Drive |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
 | [`database`](#database) | Postgres and Redis connection pooling with health checks |
@@ -155,31 +155,102 @@ let message_id = ses.send_templated_email(
 
 ### GCP
 
-Google Cloud Platform integrations using service account authentication.
+Service-account-authenticated REST client for any Google Cloud API, plus
+ergonomic wrappers for Sheets, Drive, and Vertex AI. Built on `reqwest` —
+honors `HTTPS_PROXY` / `NO_PROXY` like everything else.
 
-#### Drive
+#### Service account credentials
+
+`ServiceAccountKey` is the canonical credential type. Two ways to construct:
 
 ```rust
-use arche::gcp::drive::{get_drive_client, GcpDriveConfigBuilder};
+use arche::gcp::ServiceAccountKey;
 
-let drive = get_drive_client(None).await?;
+// From individual fields (e.g. separate env vars or a secrets manager)
+let key = ServiceAccountKey::new(client_email, private_key);
+
+// Or from a GCP service-account JSON file on disk
+let key = ServiceAccountKey::from_path("/etc/secrets/sa.json").await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `GCP_DRIVE_KEY` | Path to service account JSON key file |
+`\n` literals from `.env`-style storage are normalized to real newlines
+automatically. The `private_key` is never readable back from the struct and
+is masked in `Debug` output.
 
 #### Sheets
 
 ```rust
-use arche::gcp::sheets::{get_sheets_client, GcpSheetsConfigBuilder};
+let sheets = arche::gcp::sheets::client(Some(key), None).await?;
 
-let sheets = get_sheets_client(None).await?;
+let resp = sheets
+    .get(format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{range}",
+    ))
+    .await?
+    .send()
+    .await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `GCP_SHEETS_KEY` | Path to service account JSON key file |
+Pass either `Some(key)` or `Some(path)` — never both. Scope is preset to
+`https://www.googleapis.com/auth/spreadsheets`.
+
+#### Drive
+
+```rust
+let drive = arche::gcp::drive::client(None, Some("/etc/secrets/sa.json".into())).await?;
+
+let bytes = drive
+    .get(format!("https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"))
+    .await?
+    .send().await?
+    .bytes().await?;
+```
+
+Scope is preset to `https://www.googleapis.com/auth/drive`.
+
+#### Any other GCP REST API
+
+`GcpClient` works for any Google API that accepts `Authorization: Bearer …`:
+
+```rust
+use arche::gcp::GcpClient;
+
+let pubsub = GcpClient::new(
+    Some(key),
+    None,
+    ["https://www.googleapis.com/auth/pubsub"],
+).await?;
+
+pubsub
+    .post(format!("https://pubsub.googleapis.com/v1/projects/{p}/topics/{t}:publish"))
+    .await?
+    .json(&payload)
+    .send().await?;
+```
+
+For full HTTP control (custom timeouts, TLS config, connection pool),
+bring your own `reqwest::Client`:
+
+```rust
+let http = reqwest::Client::builder()
+    .connect_timeout(std::time::Duration::from_secs(5))
+    .build()?;
+
+let storage = GcpClient::with_http(
+    http,
+    Some(key),
+    None,
+    ["https://www.googleapis.com/auth/devstorage.read_only"],
+).await?;
+```
+
+One service account, multiple APIs — share a single token cache:
+
+```rust
+let drive   = arche::gcp::drive::client(Some(key), None).await?;
+let sheets  = drive.with_scopes(["https://www.googleapis.com/auth/spreadsheets"]);
+let storage = drive.with_scopes(["https://www.googleapis.com/auth/devstorage.read_only"]);
+```
 
 #### Vertex AI
 
@@ -189,15 +260,18 @@ captured at construction; the model is specified per-request.
 
 ```rust
 use arche::gcp::vertex::{get_vertex_client, VertexConfig, VertexProvider};
+use arche::gcp::ServiceAccountKey;
 use arche::llm::{GenerateRequest, LlmProvider, Message, StreamChunk};
 
-// Create a client bound to Gemini
+// Gemini via API key (resolved from VERTEX_API_KEY / GEMINI_API_KEY env)
 let client = get_vertex_client(VertexProvider::Gemini, None).await?;
 
-// Or with explicit config (Anthropic requires service account auth)
+// Service-account auth (required for Anthropic, optional for Gemini)
+let key = ServiceAccountKey::new(client_email, private_key);
 let client = get_vertex_client(
     VertexProvider::Anthropic,
     Some(VertexConfig::default()
+        .with_service_account_key(key)
         .with_project_id("my-project")
         .with_region("us-east5")),
 ).await?;
@@ -213,11 +287,9 @@ let request = GenerateRequest::new(
 // Non-streaming
 let response = client.generate(&request).await?;
 println!("{}", response.text().unwrap_or_default());
-println!("Tokens: {:?}", response.usage);
 
 // Streaming
 use futures::StreamExt;
-
 let mut stream = client.stream_generate(&request).await?;
 while let Some(chunk) = stream.next().await {
     match chunk? {
@@ -249,34 +321,24 @@ let request = GenerateRequest::new(
     vec![Message::user("What's the weather in Tokyo?")],
 )
 .with_tools(tools);
-
-let response = client.generate(&request).await?;
-for call in response.tool_calls() {
-    // Handle tool calls
-}
-```
-
-**Using Claude on Vertex AI** (requires service account auth):
-
-```rust
-let client = get_vertex_client(VertexProvider::Anthropic, None).await?;
-let request = GenerateRequest::new(
-    "claude-sonnet-4-20250514",
-    vec![Message::user("Hello, Claude!")],
-)
-.with_max_tokens(1024);
-let response = client.generate(&request).await?;
 ```
 
 **Authentication:**
 
-| Method | When | Env Vars |
+| Method | When | Source |
 |---|---|---|
-| API Key | Gemini only | `VERTEX_API_KEY` or `GEMINI_API_KEY` |
-| Service Account | Gemini + Anthropic | `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` |
+| API Key | Gemini only | `VertexConfig::with_api_key(...)` or `VERTEX_API_KEY` / `GEMINI_API_KEY` env |
+| Service Account | Gemini + Anthropic | `VertexConfig::with_service_account_key(ServiceAccountKey)` or `with_service_account_key_path("/path/to/sa.json")` |
 
 If an API key is present, it takes priority. Service account auth is required for
-Anthropic models. Default region: `asia-south1`.
+Anthropic models. `VERTEX_PROJECT_ID` / `VERTEX_REGION` env vars override
+config; default region is `asia-south1`. Service-account credentials must be
+passed via `VertexConfig` — arche does not auto-resolve `GOOGLE_APPLICATION_CREDENTIALS`.
+
+**Token cache** — every GCP REST call goes through a process-local token
+cache: JWT-bearer flow against `oauth2.googleapis.com/token`, signed RS256
+with the service-account key, retried once on transient failures, refreshed
+60 s before expiry, single-flighted per `(client_email, scopes)` pair.
 
 ---
 
@@ -713,7 +775,7 @@ let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 
 arche re-exports these crates so you don't need to add them separately:
 
-`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `google-drive3` · `google-sheets4`
+`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms`
 
 ---
 

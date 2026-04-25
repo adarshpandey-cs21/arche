@@ -1,15 +1,15 @@
-use crate::config::{resolve_optional, resolve_required, resolve_with_default};
+use crate::config::{resolve_optional, resolve_with_default};
 use crate::error::AppError;
-use crate::gcp::auth::{ProxiedAuthenticator, build_sa_authenticator};
-use google_drive3::yup_oauth2;
+use crate::gcp::token::{ServiceAccountKey, TokenSource};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct VertexConfig {
     pub api_key: Option<String>,
     pub project_id: Option<String>,
     pub region: Option<String>,
-    pub service_account_path: Option<String>,
-    pub service_account_json: Option<String>,
+    pub service_account_key: Option<ServiceAccountKey>,
+    pub service_account_key_path: Option<String>,
 }
 
 impl VertexConfig {
@@ -28,18 +28,16 @@ impl VertexConfig {
         self
     }
 
-    pub fn with_service_account_path(mut self, val: impl Into<String>) -> Self {
-        self.service_account_path = Some(val.into());
+    pub fn with_service_account_key(mut self, key: ServiceAccountKey) -> Self {
+        self.service_account_key = Some(key);
         self
     }
 
-    pub fn with_service_account_json(mut self, val: impl Into<String>) -> Self {
-        self.service_account_json = Some(val.into());
+    pub fn with_service_account_key_path(mut self, val: impl Into<String>) -> Self {
+        self.service_account_key_path = Some(val.into());
         self
     }
 }
-
-pub(crate) type VertexAuthenticator = ProxiedAuthenticator;
 
 pub(crate) enum ResolvedAuth {
     ApiKey {
@@ -48,11 +46,14 @@ pub(crate) enum ResolvedAuth {
     ServiceAccount {
         project_id: String,
         region: String,
-        authenticator: VertexAuthenticator,
+        token_source: Arc<TokenSource>,
     },
 }
 
-pub(crate) async fn resolve_auth(config: Option<VertexConfig>) -> Result<ResolvedAuth, AppError> {
+pub(crate) async fn resolve_auth(
+    config: Option<VertexConfig>,
+    http: reqwest::Client,
+) -> Result<ResolvedAuth, AppError> {
     let config = config.unwrap_or_default();
 
     let api_key = resolve_optional(config.api_key, "VERTEX_API_KEY")
@@ -68,50 +69,28 @@ pub(crate) async fn resolve_auth(config: Option<VertexConfig>) -> Result<Resolve
         let region =
             resolve_with_default(config.region, "VERTEX_REGION", "asia-south1".to_string());
 
-        let sa_key = if let Some(json) = config.service_account_json {
-            yup_oauth2::parse_service_account_key(json).map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    service = "vertex_ai",
-                    "Failed to parse service account JSON"
-                );
-                AppError::internal_error(
-                    format!("Failed to parse Vertex AI service account JSON: {e}"),
+        let sa_key = match (config.service_account_key, config.service_account_key_path) {
+            (Some(key), _) => key,
+            (None, Some(path)) => ServiceAccountKey::from_path(&path).await?,
+            (None, None) => {
+                return Err(AppError::internal_error(
+                    "Vertex AI service-account auth requires service_account_key or service_account_key_path".into(),
                     None,
-                )
-            })?
-        } else {
-            let path = resolve_required(
-                config.service_account_path,
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                "service_account_path or service_account_json",
-            )?;
-            yup_oauth2::read_service_account_key(&path)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        error = %e,
-                        service = "vertex_ai",
-                        "Failed to read service account key"
-                    );
-                    AppError::internal_error(
-                        format!("Failed to read Vertex AI service account key: {e}"),
-                        None,
-                    )
-                })?
+                ));
+            }
         };
 
-        let authenticator = build_sa_authenticator("vertex_ai", sa_key).await?;
+        let token_source = Arc::new(TokenSource::new(http, sa_key));
 
         return Ok(ResolvedAuth::ServiceAccount {
             project_id,
             region,
-            authenticator,
+            token_source,
         });
     }
 
     Err(AppError::internal_error(
-        "Vertex AI requires either VERTEX_API_KEY/GEMINI_API_KEY or VERTEX_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS".into(),
+        "Vertex AI requires either VERTEX_API_KEY/GEMINI_API_KEY, or VERTEX_PROJECT_ID + service_account_key/service_account_key_path".into(),
         None,
     ))
 }

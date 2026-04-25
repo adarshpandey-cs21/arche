@@ -29,24 +29,10 @@ impl VertexClient {
     pub(crate) async fn auth_header(&self) -> Result<Option<String>, AppError> {
         match &self.auth {
             ResolvedAuth::ApiKey { .. } => Ok(None),
-            ResolvedAuth::ServiceAccount { authenticator, .. } => {
-                let token = authenticator
-                    .token(&["https://www.googleapis.com/auth/cloud-platform"])
-                    .await
-                    .map_err(|e| {
-                        AppError::internal_error(
-                            format!("Failed to fetch Vertex AI access token: {e}"),
-                            None,
-                        )
-                    })?;
-
-                let bearer = token.token().ok_or_else(|| {
-                    AppError::internal_error(
-                        "Vertex AI token response contained no access token".into(),
-                        None,
-                    )
-                })?;
-
+            ResolvedAuth::ServiceAccount { token_source, .. } => {
+                let bearer = token_source
+                    .access_token(&["https://www.googleapis.com/auth/cloud-platform"])
+                    .await?;
                 Ok(Some(format!("Bearer {bearer}")))
             }
         }

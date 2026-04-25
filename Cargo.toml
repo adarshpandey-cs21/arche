@@ -43,8 +43,6 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 nanoid = "0.4.0"
 time = "0.3.44"
 axum = { version = "0.8.7", features = ["json", "multipart"] }
-google-sheets4 = "6.0.0"
-google-drive3 = "6.0.0"
 tokio = { version = "1.4.0", features = [
     "rt",
     "rt-multi-thread",
@@ -59,8 +57,6 @@ aws-sdk-sesv2 = "1.111.0"
 aws-sdk-kms = "1.68.0"
 csv-async = { version = "1.3", features = ["tokio", "with_serde"] }
 reqwest = { version = "0.12", features = ["stream", "json"] }
-http = "1"
-hyper-proxy2 = { version = "0.1", default-features = false }
 base64 = "0.22.1"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
