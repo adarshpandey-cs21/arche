@@ -210,8 +210,26 @@ pub enum StreamChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: String,
     pub parameters: ParameterSchema,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty", default)]
+    pub metadata: IndexMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAnnotations {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destructive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_world: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,14 +268,60 @@ impl ToolDefinition {
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            title: None,
             description: description.into(),
             parameters: ParameterSchema::object(),
+            annotations: None,
+            metadata: IndexMap::new(),
         }
     }
 
     pub fn with_parameters(mut self, params: ParameterSchema) -> Self {
         self.parameters = params;
         self
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
+    pub fn with_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_metadata_entries<I, K, V>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<serde_json::Value>,
+    {
+        for (k, v) in entries {
+            self.metadata.insert(k.into(), v.into());
+        }
+        self
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub fn annotations(&self) -> Option<&ToolAnnotations> {
+        self.annotations.as_ref()
+    }
+
+    pub fn metadata(&self) -> &IndexMap<String, serde_json::Value> {
+        &self.metadata
     }
 }
 
@@ -418,5 +482,96 @@ mod tests {
         assert_eq!(m.role, Role::Assistant);
         assert_eq!(m.content.len(), 1);
         assert!(matches!(m.content[0], ContentPart::ToolCall { .. }));
+    }
+
+    #[test]
+    fn tool_definition_default_has_no_annotations_or_metadata() {
+        let t = ToolDefinition::new("foo", "does foo");
+        assert!(t.title().is_none());
+        assert!(t.annotations().is_none());
+        assert!(t.metadata().is_empty());
+    }
+
+    #[test]
+    fn tool_definition_builders_chain_and_persist() {
+        let t = ToolDefinition::new("create_cart", "Create a cart")
+            .with_title("Create Cart")
+            .with_annotations(ToolAnnotations {
+                read_only: Some(false),
+                destructive: Some(false),
+                idempotent: Some(false),
+                open_world: Some(false),
+            })
+            .with_metadata("mcp.invoking", "Creating cart…")
+            .with_metadata("mcp.invoked", "Cart created");
+
+        assert_eq!(t.title(), Some("Create Cart"));
+        let a = t.annotations().expect("annotations set");
+        assert_eq!(a.read_only, Some(false));
+        assert_eq!(a.destructive, Some(false));
+        assert_eq!(a.idempotent, Some(false));
+        assert_eq!(a.open_world, Some(false));
+        assert_eq!(
+            t.metadata().get("mcp.invoking").and_then(|v| v.as_str()),
+            Some("Creating cart…")
+        );
+        assert_eq!(
+            t.metadata().get("mcp.invoked").and_then(|v| v.as_str()),
+            Some("Cart created")
+        );
+    }
+
+    #[test]
+    fn tool_definition_with_metadata_entries_bulk_inserts() {
+        let t = ToolDefinition::new("x", "x")
+            .with_metadata_entries([("mcp.invoking", "Working…"), ("mcp.invoked", "Done")]);
+        assert_eq!(t.metadata().len(), 2);
+    }
+
+    #[test]
+    fn tool_definition_serialize_omits_unset_optional_fields() {
+        let t = ToolDefinition::new("foo", "does foo");
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("title").is_none(), "title leaked: {v}");
+        assert!(v.get("annotations").is_none(), "annotations leaked: {v}");
+        assert!(v.get("metadata").is_none(), "empty metadata leaked: {v}");
+    }
+
+    #[test]
+    fn tool_definition_pre_extension_json_round_trips() {
+        let pre = serde_json::json!({
+            "name": "foo",
+            "description": "does foo",
+            "parameters": { "type": "object", "properties": {} }
+        });
+        let t: ToolDefinition = serde_json::from_value(pre).unwrap();
+        let post = serde_json::to_value(&t).unwrap();
+        assert_eq!(post.get("title"), None);
+        assert_eq!(post.get("annotations"), None);
+        assert_eq!(post.get("metadata"), None);
+        assert_eq!(post["name"], "foo");
+        assert_eq!(post["description"], "does foo");
+    }
+
+    #[test]
+    fn tool_annotations_serialize_omits_none_fields() {
+        let a = ToolAnnotations {
+            read_only: Some(true),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["read_only"], true);
+        assert!(v.get("destructive").is_none());
+        assert!(v.get("idempotent").is_none());
+        assert!(v.get("open_world").is_none());
+    }
+
+    #[test]
+    fn tool_annotations_default_is_all_none() {
+        let a = ToolAnnotations::default();
+        assert!(a.read_only.is_none());
+        assert!(a.destructive.is_none());
+        assert!(a.idempotent.is_none());
+        assert!(a.open_world.is_none());
     }
 }
