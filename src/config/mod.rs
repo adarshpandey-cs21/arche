@@ -1,6 +1,7 @@
 mod resolve;
 
 pub(crate) mod aws;
+pub(crate) mod cloudfront;
 pub(crate) mod pg;
 pub(crate) mod redis;
 pub(crate) mod s3;

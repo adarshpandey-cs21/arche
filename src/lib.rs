@@ -13,6 +13,7 @@ pub mod sockets;
 pub mod utils;
 
 pub use aws_config;
+pub use aws_sdk_cloudfront;
 pub use aws_sdk_kms;
 pub use aws_sdk_s3;
 pub use aws_sdk_sesv2;
