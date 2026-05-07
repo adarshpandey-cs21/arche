@@ -48,6 +48,26 @@ impl CloudFrontClient {
         }
     }
 
+    fn resolve_distribution_id(
+        &self,
+        distribution_id: Option<&str>,
+        method: &str,
+    ) -> Result<String, AppError> {
+        distribution_id
+            .map(|s| s.to_string())
+            .or_else(|| self.default_distribution_id.clone())
+            .ok_or_else(|| {
+                AppError::bad_request(
+                    None,
+                    Some(format!(
+                        "CloudFront {}: distribution_id not provided and no default configured",
+                        method
+                    )),
+                    None,
+                )
+            })
+    }
+
     /// If `caller_reference` is `None`, a fresh nanoid is generated, so retries will create
     /// duplicate invalidations. Pass a stable reference for retry-safe idempotency.
     pub async fn invalidate_paths(
@@ -56,20 +76,7 @@ impl CloudFrontClient {
         paths: Vec<String>,
         caller_reference: Option<&str>,
     ) -> Result<InvalidationResult, AppError> {
-        let distribution_id = distribution_id
-            .map(|s| s.to_string())
-            .or_else(|| self.default_distribution_id.clone())
-            .ok_or_else(|| {
-                AppError::bad_request(
-                    None,
-                    Some(
-                        "CloudFront invalidate_paths: distribution_id not provided and no \
-                         default configured"
-                            .to_string(),
-                    ),
-                    None,
-                )
-            })?;
+        let distribution_id = self.resolve_distribution_id(distribution_id, "invalidate_paths")?;
 
         if paths.is_empty() {
             return Err(AppError::bad_request(
@@ -140,6 +147,48 @@ impl CloudFrontClient {
         let invalidation = response.invalidation().ok_or_else(|| {
             AppError::internal_error(
                 "CloudFront create_invalidation returned no invalidation".to_string(),
+                None,
+            )
+        })?;
+
+        Ok(InvalidationResult {
+            id: invalidation.id().to_string(),
+            status: invalidation.status().to_string(),
+        })
+    }
+
+    pub async fn get_invalidation(
+        &self,
+        distribution_id: Option<&str>,
+        invalidation_id: &str,
+    ) -> Result<InvalidationResult, AppError> {
+        let distribution_id = self.resolve_distribution_id(distribution_id, "get_invalidation")?;
+
+        if invalidation_id.is_empty() {
+            return Err(AppError::bad_request(
+                None,
+                Some("CloudFront get_invalidation: invalidation_id must not be empty".to_string()),
+                None,
+            ));
+        }
+
+        let response = self
+            .client
+            .get_invalidation()
+            .distribution_id(distribution_id)
+            .id(invalidation_id)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::internal_error(
+                    format!("CloudFront get_invalidation failed: {:?}", e),
+                    None,
+                )
+            })?;
+
+        let invalidation = response.invalidation().ok_or_else(|| {
+            AppError::internal_error(
+                "CloudFront get_invalidation returned no invalidation".to_string(),
                 None,
             )
         })?;

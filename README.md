@@ -32,14 +32,14 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "2.5.0"
+arche = "4.1.0"
 ```
 
 ## Modules
 
 | Module | What it does |
 |---|---|
-| [`aws`](#aws) | S3, SES, and KMS via official AWS SDKs |
+| [`aws`](#aws) | S3, SES, KMS, and CloudFront via official AWS SDKs |
 | [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude) wrappers for Sheets / Drive |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
@@ -150,6 +150,57 @@ let message_id = ses.send_templated_email(
 | Env Var | Description |
 |---|---|
 | `AWS_REGION` | AWS region (default: `ap-south-1`) |
+
+#### CloudFront
+
+```rust
+use arche::aws::cloudfront::{get_cloudfront_client, CloudFrontClient, CloudFrontConfigBuilder};
+
+let aws = get_cloudfront_client(None).await;
+let cf = CloudFrontClient::new(aws, None);
+```
+
+**Invalidate paths** — submits a CloudFront invalidation and returns immediately
+with the invalidation ID and status (typically `"InProgress"`).
+
+```rust
+let result = cf.invalidate_paths(
+    Some("E1ABCXYZ"),
+    vec!["/index.html".into(), "/assets/*".into()],
+    None, // caller_reference: None auto-generates a nanoid (not retry-safe); pass a stable value for idempotent retries
+).await?;
+println!("{} -> {}", result.id, result.status);
+```
+
+Per CloudFront limits: paths must start with `/`, max 3000 paths per call,
+caller reference ≤ 128 chars.
+
+**Get invalidation status** — fetch the current status of a previously created
+invalidation. Returns the same `InvalidationResult` shape; status transitions
+from `"InProgress"` to `"Completed"` (typically 5–15 minutes).
+
+```rust
+let status = cf.get_invalidation(Some("E1ABCXYZ"), &result.id).await?;
+println!("{}", status.status);
+```
+
+**Default distribution ID** — set once on the client (or via
+`CLOUDFRONT_DISTRIBUTION_ID` env) so per-call `distribution_id` can be `None`:
+
+```rust
+let config = CloudFrontConfigBuilder::default()
+    .distribution_id("E1ABCXYZ")
+    .build();
+let cf = CloudFrontClient::new(aws, config);
+
+cf.invalidate_paths(None, vec!["/index.html".into()], None).await?;
+cf.get_invalidation(None, "I2J3K4L5...").await?;
+```
+
+| Env Var | Description |
+|---|---|
+| `AWS_REGION` | AWS region (default: `ap-south-1`) |
+| `CLOUDFRONT_DISTRIBUTION_ID` | Optional default distribution ID |
 
 ---
 
@@ -775,7 +826,7 @@ let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 
 arche re-exports these crates so you don't need to add them separately:
 
-`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms`
+`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `aws-sdk-cloudfront`
 
 ---
 
