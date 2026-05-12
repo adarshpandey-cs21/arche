@@ -138,16 +138,16 @@ impl CloudFrontClient {
             .send()
             .await
             .map_err(|e| {
-                AppError::internal_error(
+                AppError::dependency_failed(
+                    "cloudfront",
                     format!("CloudFront create_invalidation failed: {:?}", e),
-                    None,
                 )
             })?;
 
         let invalidation = response.invalidation().ok_or_else(|| {
-            AppError::internal_error(
-                "CloudFront create_invalidation returned no invalidation".to_string(),
-                None,
+            AppError::dependency_failed(
+                "cloudfront",
+                "CloudFront create_invalidation returned no invalidation",
             )
         })?;
 
@@ -180,16 +180,16 @@ impl CloudFrontClient {
             .send()
             .await
             .map_err(|e| {
-                AppError::internal_error(
+                AppError::dependency_failed(
+                    "cloudfront",
                     format!("CloudFront get_invalidation failed: {:?}", e),
-                    None,
                 )
             })?;
 
         let invalidation = response.invalidation().ok_or_else(|| {
-            AppError::internal_error(
-                "CloudFront get_invalidation returned no invalidation".to_string(),
-                None,
+            AppError::dependency_failed(
+                "cloudfront",
+                "CloudFront get_invalidation returned no invalidation",
             )
         })?;
 
