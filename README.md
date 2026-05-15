@@ -40,7 +40,7 @@ arche = "4.1.0"
 | Module | What it does |
 |---|---|
 | [`aws`](#aws) | S3, SES, KMS, and CloudFront via official AWS SDKs |
-| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude) wrappers for Sheets / Drive |
+| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, and Cloud KMS |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
 | [`database`](#database) | Postgres and Redis connection pooling with health checks |
@@ -258,6 +258,62 @@ let bytes = drive
 ```
 
 Scope is preset to `https://www.googleapis.com/auth/drive`.
+
+#### Cloud KMS
+
+Encrypt and decrypt against Google Cloud KMS using the same service-account
+JWT auth as the rest of the GCP family — token caching, retries, and
+concurrent-fetch deduplication come for free via `GcpClient`.
+
+```rust
+use arche::gcp::kms::{get_kms_client, GcpKmsConfig, GcpKmsKey};
+
+// Build the client. Any unset field falls back to its GCP_KMS_* env var.
+let kms = get_kms_client(
+    Some(key),
+    None,
+    GcpKmsConfig::builder().project_id("my-project").build(),
+).await?;
+
+// Or fully env-driven (project_id required; location defaults to "global"):
+let kms = get_kms_client(Some(key), None, None).await?;
+
+// Key identifier — passed per call so one client can target multiple keys
+let kms_key = GcpKmsKey::new("my-keyring", "my-key");
+// or: let kms_key = GcpKmsKey::from_env()?;  // GCP_KMS_KEY_RING + GCP_KMS_KEY_NAME
+
+// Encrypt — returns ciphertext + the key version that wrapped it
+let out = kms.encrypt(&kms_key, b"sensitive data").await?;
+// out.ciphertext: Vec<u8>
+// out.key_version: e.g. "projects/.../cryptoKeys/my-key/cryptoKeyVersions/3"
+//   Persist this alongside the ciphertext for key-rotation auditing.
+
+let plaintext = kms.decrypt(&kms_key, &out.ciphertext).await?;
+
+// If the ciphertext is already base64 (e.g. read from a DB column):
+let plaintext = kms.decrypt_base64(&kms_key, &b64_string).await?;
+```
+
+| Env Var | Description |
+|---|---|
+| `GCP_KMS_PROJECT_ID` | GCP project hosting the KMS key (required) |
+| `GCP_KMS_LOCATION` | KMS location (default: `global`) |
+| `GCP_KMS_BASE_URL` | Override the Cloud KMS endpoint (testing / VPC-SC) |
+| `GCP_KMS_KEY_RING` | Used by `GcpKmsKey::from_env()` |
+| `GCP_KMS_KEY_NAME` | Used by `GcpKmsKey::from_env()` |
+
+Already have a `GcpClient` configured for other services? Reuse it via the
+exported scope — keeps a single token cache across Sheets / Drive / KMS:
+
+```rust
+let kms_gcp = my_gcp_client.with_scopes([arche::gcp::kms::KMS_SCOPE]);
+let kms = arche::gcp::kms::GcpKmsClient::new(
+    kms_gcp,
+    "my-project".into(),
+    "global".into(),
+    None,
+);
+```
 
 #### Any other GCP REST API
 
