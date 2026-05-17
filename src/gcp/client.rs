@@ -4,7 +4,7 @@ use std::time::Duration;
 use reqwest::{IntoUrl, Method, RequestBuilder};
 
 use crate::error::AppError;
-use crate::gcp::token::{ServiceAccountKey, TokenSource};
+use crate::gcp::token::{DEFAULT_METADATA_BASE_URL, ServiceAccountKey, TokenSource};
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,22 +38,24 @@ impl GcpClient {
         path: Option<String>,
         scopes: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, AppError> {
-        let sa_key = match (key, path) {
-            (Some(k), _) => k,
-            (None, Some(p)) => ServiceAccountKey::from_path(&p).await?,
+        let token_source = match (key, path) {
+            (Some(k), _) => TokenSource::new(http.clone(), k),
+            (None, Some(p)) => {
+                let k = ServiceAccountKey::from_path(&p).await?;
+                TokenSource::new(http.clone(), k)
+            }
             (None, None) => {
-                return Err(AppError::internal_error(
-                    "GcpClient requires a ServiceAccountKey or a service-account JSON file path"
-                        .into(),
-                    None,
-                ));
+                let base_url = std::env::var("GCP_METADATA_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| DEFAULT_METADATA_BASE_URL.to_string());
+                TokenSource::metadata(http.clone(), base_url)
             }
         };
 
-        let token = Arc::new(TokenSource::new(http.clone(), sa_key));
         Ok(Self {
             http,
-            token,
+            token: Arc::new(token_source),
             scopes: Arc::new(scopes.into_iter().map(Into::into).collect()),
         })
     }
@@ -71,7 +73,7 @@ impl GcpClient {
         &self.http
     }
 
-    pub(crate) fn signer_email(&self) -> &str {
+    pub(crate) fn signer_email(&self) -> Result<&str, AppError> {
         self.token.signer_email()
     }
 

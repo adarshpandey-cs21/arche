@@ -228,6 +228,41 @@ let key = ServiceAccountKey::from_path("/etc/secrets/sa.json").await?;
 automatically. The `private_key` is never readable back from the struct and
 is masked in `Debug` output.
 
+#### Authentication modes
+
+Every `GcpClient` constructor accepts credentials in three forms, tried in
+order:
+
+1. **Explicit `ServiceAccountKey`** — `GcpClient::new(Some(key), None, scopes)`.
+2. **Path to a service-account JSON file** — `GcpClient::new(None, Some(path), scopes)`.
+3. **Neither → GKE / GCE metadata server (Workload Identity).** When both are
+   `None`, arche falls back to
+   `${GCP_METADATA_URL:-http://metadata.google.internal}` and exchanges the
+   pod's bound service account for an OAuth token. This is the standard
+   no-secrets-on-disk flow for pods running on GKE, Cloud Run, or GCE.
+
+```rust
+// Workload Identity — no creds passed in, no env vars required on GKE.
+let kms = arche::gcp::kms::get_kms_client(None, None, None).await?;
+```
+
+Tokens are cached with a 60 s safety margin, single-flighted per scope set,
+and retried once on transient failures — uniformly across all three modes.
+
+**Caveats for the metadata-server path:**
+
+- **Scopes are ignored.** The metadata endpoint returns whatever scopes the
+  pod's bound service account has, regardless of what you pass to the
+  client. If you need narrower scopes, use an explicit `ServiceAccountKey`.
+- **`GCP_METADATA_URL` is read at construction time.** Changing the env var
+  after the client is built has no effect — set it before the first
+  `GcpClient::new(None, None, …)` call. Useful for pointing tests at a
+  mock HTTP server.
+- **Signed URLs are unsupported.** V4 signed URLs (`GcsClient::sign_*`)
+  require the SA's private key, which the metadata server never exposes.
+  Those calls return a clear error on this path — use an explicit
+  `ServiceAccountKey` for signed-URL workflows.
+
 #### Sheets
 
 ```rust

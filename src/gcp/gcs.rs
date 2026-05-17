@@ -451,7 +451,7 @@ impl GcsClient {
         );
 
         let credential_scope = format!("{datestamp}/auto/storage/goog4_request");
-        let credential = format!("{}/{credential_scope}", self.gcp.signer_email());
+        let credential = format!("{}/{credential_scope}", self.gcp.signer_email()?);
         let encoded_credential = utf8_percent_encode(&credential, QUERY_VALUE).to_string();
 
         let encoded_bucket = utf8_percent_encode(bucket, SIGNING_PATH).to_string();
