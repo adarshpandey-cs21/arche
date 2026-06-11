@@ -32,7 +32,7 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "4.5.1"
+arche = "4.7.0"
 ```
 
 ## Modules
@@ -50,7 +50,7 @@ arche = "4.5.1"
 | [`crypto`](#crypto) | AES-128-CBC encryption with PBKDF2 key derivation |
 | [`sockets`](#sockets) | WebSocket connection registry with broadcast |
 | [`error`](#error) | Axum-compatible structured error responses (400–503) |
-| [`utils`](#utils) | Timestamp validation, date/time conversions, pagination |
+| [`utils`](#utils) | Alphanumeric nano IDs, timestamp validation, date/time conversions, pagination |
 
 Every service module exports a **config builder** so you can wire up credentials
 programmatically — or omit it entirely and let arche resolve everything from
@@ -1080,14 +1080,32 @@ async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
 details. Enable `verbose-errors` to expose raw error details (dev/staging only):
 
 ```toml
-arche = { version = "4.5.1", features = ["verbose-errors"] }
+arche = { version = "4.7.0", features = ["verbose-errors"] }
 ```
 
 ---
 
 ### Utils
 
-Date/time conversion traits and pagination helpers.
+ID generation, date/time conversion traits, and pagination helpers.
+
+#### Nano IDs
+
+URL-safe, **strictly alphanumeric** unique IDs (`0-9 a-z A-Z` — no `-` or `_`),
+so they're safe in subdomains, file names, and anywhere symbol characters
+cause friction:
+
+```rust
+use arche::utils::{nano_id, nano_id_of};
+
+// 21 characters — same collision resistance class as a standard nanoid
+let id = nano_id();          // e.g. "V1StGXR8Z5jdHi6BmyT9k"
+
+// Custom length
+let short = nano_id_of(8);   // e.g. "fX3kQ9aZ"
+```
+
+#### Date/time & pagination
 
 ```rust
 use arche::utils::{validate_timestamp, FromOffsetDateTime, PaginationParams};

@@ -1,4 +1,5 @@
 use super::error::AppError;
+use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use sqlx::types::time::OffsetDateTime;
 use std::{
@@ -6,6 +7,30 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use time::format_description::well_known::Iso8601;
+
+const ALPHANUMERIC_ALPHABET: [char; 62] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
+    'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B',
+    'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U',
+    'V', 'W', 'X', 'Y', 'Z',
+];
+
+pub fn nano_id() -> String {
+    nano_id_of(21)
+}
+
+pub fn nano_id_of(size: usize) -> String {
+    nanoid!(size)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                nanoid!(1, &ALPHANUMERIC_ALPHABET).chars().next().unwrap()
+            }
+        })
+        .collect()
+}
 
 #[allow(dead_code)]
 pub trait ToOffsetDateTime {
