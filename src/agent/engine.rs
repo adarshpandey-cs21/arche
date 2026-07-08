@@ -122,6 +122,7 @@ impl AgentEngine {
                             {
                                 Ok(output) => output,
                                 Err(e) => {
+                                    let detail = e.detailed_error_message();
                                     yield Ok(SseEvent::ToolStatus {
                                         tool: name.clone(),
                                         status: ToolCallStatus::Error,
@@ -129,9 +130,9 @@ impl AgentEngine {
                                     });
                                     yield Ok(SseEvent::Error {
                                         code: "tool_error".into(),
-                                        message: e.to_string(),
+                                        message: detail.clone(),
                                     });
-                                    ToolOutput::text(format!("Error executing {name}: {e}"))
+                                    ToolOutput::text(format!("Error executing {name}: {detail}"))
                                 }
                             };
 

@@ -93,7 +93,7 @@ Not drawn in the diagram so the happy path stays readable. All paths still termi
 |---|---|---|
 | `provider.stream_generate()` returns Err | `SseEvent::Error { code: "llm_error", .. }` | outer loop breaks |
 | Mid-stream chunk is Err | `SseEvent::Error { code: "stream_error", .. }` | inner chunk loop breaks; outer continues if a tool call was already handled this round |
-| `flow.execute_tool()` returns Err | `SseEvent::ToolStatus(Error)` + `SseEvent::Error { code: "tool_error", .. }` | error text is fed back to the LLM as the tool's content so the model can recover; loop continues |
+| `flow.execute_tool()` returns Err | `SseEvent::ToolStatus(Error)` + `SseEvent::Error { code: "tool_error", .. }` | the error's `detailed_error_message()` is fed back to the LLM as the tool's content so the model can recover; loop continues |
 | `HistoryCompactor::compact()` returns Err | (none to the client) | logged at `warn!`; falls through to raw truncation |
 | `max_tool_rounds` reached | `SseEvent::Error { code: "max_tool_rounds", .. }` | outer loop breaks |
 
