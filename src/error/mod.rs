@@ -129,6 +129,19 @@ impl AppError {
     pub fn is_dependency_error(&self) -> bool {
         matches!(self, Self::DependencyFailed { .. })
     }
+
+    pub fn detailed_error_message(&self) -> String {
+        match self {
+            Self::BadRequest { message, .. }
+            | Self::UnprocessableEntity { message, .. }
+            | Self::InternalError { message, .. } => {
+                message.clone().unwrap_or_else(|| self.to_string())
+            }
+            Self::Conflict { message } => message.clone(),
+            Self::DependencyFailed { detail, .. } => detail.clone(),
+            _ => self.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
