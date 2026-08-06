@@ -9,6 +9,7 @@ pub mod json;
 pub mod jwt;
 pub mod middleware;
 pub mod oidc;
+pub mod queue;
 pub mod sockets;
 pub mod utils;
 
@@ -27,6 +28,7 @@ pub use dotenv;
 pub use futures;
 pub use jsonwebtoken;
 pub use nanoid;
+pub use rdkafka;
 pub use reqwest;
 pub use rsa;
 pub use senno;
