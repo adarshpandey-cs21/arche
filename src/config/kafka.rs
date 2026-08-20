@@ -1,11 +1,19 @@
 use std::collections::HashMap;
 
-use crate::queue::kafka::AutoOffsetReset;
+use crate::queue::kafka::{AutoOffsetReset, SaslMechanism, SecurityProtocol};
 
 #[derive(Debug, Clone, Default)]
 pub struct KafkaConnectionConfig {
     pub brokers: Option<Vec<String>>,
     pub socket_timeout_ms: Option<u64>,
+    pub security_protocol: Option<SecurityProtocol>,
+    pub sasl_mechanism: Option<SaslMechanism>,
+    pub sasl_username: Option<String>,
+    pub sasl_password: Option<String>,
+    pub ssl_ca_location: Option<String>,
+    pub ssl_certificate_location: Option<String>,
+    pub ssl_key_location: Option<String>,
+    pub ssl_key_password: Option<String>,
     pub extra_options: Option<HashMap<String, String>>,
 }
 
@@ -19,6 +27,14 @@ impl KafkaConnectionConfig {
 pub struct KafkaConnectionConfigBuilder {
     brokers: Option<Vec<String>>,
     socket_timeout_ms: Option<u64>,
+    security_protocol: Option<SecurityProtocol>,
+    sasl_mechanism: Option<SaslMechanism>,
+    sasl_username: Option<String>,
+    sasl_password: Option<String>,
+    ssl_ca_location: Option<String>,
+    ssl_certificate_location: Option<String>,
+    ssl_key_location: Option<String>,
+    ssl_key_password: Option<String>,
     extra_options: Option<HashMap<String, String>>,
 }
 
@@ -43,6 +59,46 @@ impl KafkaConnectionConfigBuilder {
 
     pub fn socket_timeout_ms(mut self, ms: u64) -> Self {
         self.socket_timeout_ms = Some(ms);
+        self
+    }
+
+    pub fn security_protocol(mut self, protocol: SecurityProtocol) -> Self {
+        self.security_protocol = Some(protocol);
+        self
+    }
+
+    pub fn sasl_mechanism(mut self, mechanism: SaslMechanism) -> Self {
+        self.sasl_mechanism = Some(mechanism);
+        self
+    }
+
+    pub fn sasl_username(mut self, username: impl Into<String>) -> Self {
+        self.sasl_username = Some(username.into());
+        self
+    }
+
+    pub fn sasl_password(mut self, password: impl Into<String>) -> Self {
+        self.sasl_password = Some(password.into());
+        self
+    }
+
+    pub fn ssl_ca_location(mut self, path: impl Into<String>) -> Self {
+        self.ssl_ca_location = Some(path.into());
+        self
+    }
+
+    pub fn ssl_certificate_location(mut self, path: impl Into<String>) -> Self {
+        self.ssl_certificate_location = Some(path.into());
+        self
+    }
+
+    pub fn ssl_key_location(mut self, path: impl Into<String>) -> Self {
+        self.ssl_key_location = Some(path.into());
+        self
+    }
+
+    pub fn ssl_key_password(mut self, password: impl Into<String>) -> Self {
+        self.ssl_key_password = Some(password.into());
         self
     }
 
@@ -72,7 +128,33 @@ impl KafkaConnectionConfigBuilder {
         KafkaConnectionConfig {
             brokers: self.brokers,
             socket_timeout_ms: self.socket_timeout_ms,
+            security_protocol: self.security_protocol,
+            sasl_mechanism: self.sasl_mechanism,
+            sasl_username: self.sasl_username,
+            sasl_password: self.sasl_password,
+            ssl_ca_location: self.ssl_ca_location,
+            ssl_certificate_location: self.ssl_certificate_location,
+            ssl_key_location: self.ssl_key_location,
+            ssl_key_password: self.ssl_key_password,
             extra_options: self.extra_options,
+        }
+    }
+}
+
+impl From<KafkaConnectionConfig> for KafkaConnectionConfigBuilder {
+    fn from(config: KafkaConnectionConfig) -> Self {
+        Self {
+            brokers: config.brokers,
+            socket_timeout_ms: config.socket_timeout_ms,
+            security_protocol: config.security_protocol,
+            sasl_mechanism: config.sasl_mechanism,
+            sasl_username: config.sasl_username,
+            sasl_password: config.sasl_password,
+            ssl_ca_location: config.ssl_ca_location,
+            ssl_certificate_location: config.ssl_certificate_location,
+            ssl_key_location: config.ssl_key_location,
+            ssl_key_password: config.ssl_key_password,
+            extra_options: config.extra_options,
         }
     }
 }
@@ -98,6 +180,11 @@ pub struct KafkaProducerConfigBuilder {
 }
 
 impl KafkaProducerConfigBuilder {
+    pub fn connection(mut self, connection: KafkaConnectionConfig) -> Self {
+        self.connection = connection.into();
+        self
+    }
+
     pub fn broker(mut self, broker: impl Into<String>) -> Self {
         self.connection = self.connection.broker(broker);
         self
@@ -180,6 +267,11 @@ pub struct KafkaConsumerConfigBuilder {
 }
 
 impl KafkaConsumerConfigBuilder {
+    pub fn connection(mut self, connection: KafkaConnectionConfig) -> Self {
+        self.connection = connection.into();
+        self
+    }
+
     pub fn broker(mut self, broker: impl Into<String>) -> Self {
         self.connection = self.connection.broker(broker);
         self
@@ -267,5 +359,107 @@ impl KafkaConsumerConfigBuilder {
             auto_commit: self.auto_commit,
             auto_commit_interval_ms: self.auto_commit_interval_ms,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_builder_accumulates_brokers_and_options() {
+        let config = KafkaConnectionConfig::builder()
+            .broker("a:9092")
+            .broker("b:9092")
+            .extra_option("k1", "v1")
+            .extra_option("k2", "v2")
+            .build();
+
+        assert_eq!(
+            config.brokers,
+            Some(vec!["a:9092".to_string(), "b:9092".to_string()])
+        );
+        let extra = config.extra_options.unwrap_or_default();
+        assert_eq!(extra.get("k1").map(String::as_str), Some("v1"));
+        assert_eq!(extra.get("k2").map(String::as_str), Some("v2"));
+    }
+
+    #[test]
+    fn brokers_replaces_previous_list() {
+        let config = KafkaConnectionConfig::builder()
+            .broker("old:9092")
+            .brokers(["a:9092", "b:9092"])
+            .build();
+        assert_eq!(
+            config.brokers,
+            Some(vec!["a:9092".to_string(), "b:9092".to_string()])
+        );
+    }
+
+    #[test]
+    fn producer_builder_layers_on_top_of_shared_connection() {
+        let connection = KafkaConnectionConfig::builder()
+            .security_protocol(SecurityProtocol::SaslSsl)
+            .sasl_mechanism(SaslMechanism::ScramSha512)
+            .sasl_username("user")
+            .sasl_password("pass")
+            .ssl_ca_location("/ca.pem")
+            .build();
+
+        let config = KafkaProducerConfig::builder()
+            .connection(connection)
+            .broker("a:9092")
+            .socket_timeout_ms(1_000)
+            .topic("orders")
+            .message_timeout_ms(2_000)
+            .build();
+
+        assert_eq!(config.topic.as_deref(), Some("orders"));
+        assert_eq!(config.message_timeout_ms, Some(2_000));
+        assert_eq!(config.connection.socket_timeout_ms, Some(1_000));
+        assert_eq!(
+            config.connection.security_protocol,
+            Some(SecurityProtocol::SaslSsl)
+        );
+        assert_eq!(
+            config.connection.sasl_mechanism,
+            Some(SaslMechanism::ScramSha512)
+        );
+        assert_eq!(config.connection.sasl_username.as_deref(), Some("user"));
+        assert_eq!(config.connection.sasl_password.as_deref(), Some("pass"));
+        assert_eq!(
+            config.connection.ssl_ca_location.as_deref(),
+            Some("/ca.pem")
+        );
+    }
+
+    #[test]
+    fn consumer_builder_accumulates_topics_and_accepts_shared_connection() {
+        let connection = KafkaConnectionConfig::builder()
+            .broker("a:9092")
+            .security_protocol(SecurityProtocol::Ssl)
+            .build();
+
+        let config = KafkaConsumerConfig::builder()
+            .connection(connection)
+            .topic("orders")
+            .topic("returns")
+            .group_id("svc")
+            .auto_offset_reset(AutoOffsetReset::Latest)
+            .auto_commit(true)
+            .build();
+
+        assert_eq!(
+            config.topics,
+            Some(vec!["orders".to_string(), "returns".to_string()])
+        );
+        assert_eq!(config.group_id.as_deref(), Some("svc"));
+        assert_eq!(config.auto_offset_reset, Some(AutoOffsetReset::Latest));
+        assert_eq!(config.auto_commit, Some(true));
+        assert_eq!(config.connection.brokers, Some(vec!["a:9092".to_string()]));
+        assert_eq!(
+            config.connection.security_protocol,
+            Some(SecurityProtocol::Ssl)
+        );
     }
 }

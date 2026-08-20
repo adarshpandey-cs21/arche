@@ -895,44 +895,65 @@ Notes:
 
 #### Kafka
 
-A thin wrapper around [`rdkafka`](https://docs.rs/rdkafka) providing a
-convenience producer, a raw parsed-message consumer stream, and a broker
-health check. Unlike a typical high-level consumer wrapper, batching and
-commit timing are not owned by arche — callers decide that policy entirely,
-for example using `tokio_stream::StreamExt::chunks_timeout`.
+Enabled with the `kafka` cargo feature (`arche = { version = "...", features = ["kafka"] }`),
+since it compiles librdkafka and OpenSSL from source and most services don't
+need it. A thin wrapper around [`rdkafka`](https://docs.rs/rdkafka) providing a
+convenience producer, a JSON-decoded consumer stream (plus a raw-bytes
+stream), and a broker health check. Unlike a typical high-level consumer
+wrapper, batching and commit timing are not owned by arche — callers decide
+that policy entirely, for example using
+`tokio_stream::StreamExt::chunks_timeout`.
 
 Kafka configuration is always explicit — no field is ever resolved from
-the process environment. Configuration is split into three types:
-`KafkaConnectionConfig` (fields shared by every role: `brokers`,
-`socket_timeout_ms`, `extra_options`), `KafkaProducerConfig` (embeds
+the process environment (read your own env vars and pass them in).
+Configuration is split into three types: `KafkaConnectionConfig` (fields
+shared by every role: `brokers`, `socket_timeout_ms`, security/SASL/SSL
+settings, `extra_options`), `KafkaProducerConfig` (embeds
 `KafkaConnectionConfig` plus `topic`/`message_timeout_ms`), and
 `KafkaConsumerConfig` (embeds `KafkaConnectionConfig` plus
-`topics`/`group_id`/etc.) — each builder exposes the common methods
-(`.broker()`, `.socket_timeout_ms()`, `.extra_option()`, ...) directly, so
-there's no nesting required at the call site.
+`topics`/`group_id`/etc.). Build the connection once and hand it to each
+role builder via `.connection(..)` (call it first — it replaces the embedded
+connection); the role builders also expose `.broker()`, `.brokers()`,
+`.socket_timeout_ms()` and `.extra_option(s)()` directly for the simple
+plaintext case.
 
 ```rust
 use arche::queue::kafka::{
     get_kafka_producer, get_kafka_consumer, test_kafka,
-    KafkaProducerConfig, KafkaConsumerConfig, CommitMode,
+    KafkaConnectionConfig, KafkaProducerConfig, KafkaConsumerConfig,
+    SecurityProtocol, SaslMechanism, CommitMode, KafkaConsumeError,
 };
 use arche::tokio_stream::StreamExt;
 use std::time::Duration;
 
-// Producer and consumer configs are fully independent types.
+// Shared connection settings — here for a SASL/SCRAM-over-TLS cluster
+// (AWS MSK, Confluent Cloud, Aiven, ...). For a local plaintext broker
+// just `.broker("localhost:9092")` is enough.
+let connection = KafkaConnectionConfig::builder()
+    .brokers(["b-1.example:9096", "b-2.example:9096"])
+    .security_protocol(SecurityProtocol::SaslSsl)
+    .sasl_mechanism(SaslMechanism::ScramSha512)
+    .sasl_username("svc-user")
+    .sasl_password("secret")
+    // .ssl_ca_location("/etc/ssl/certs/ca.pem") // only for private CAs
+    .build();
+
 let producer_config = KafkaProducerConfig::builder()
-    .broker("localhost:9092")
+    .connection(connection.clone())
     .topic("orders")
     .build();
 
 let consumer_config = KafkaConsumerConfig::builder()
-    .broker("localhost:9092")
+    .connection(connection.clone())
     .topic("orders") // or .topics(["orders", "returns"]) for multiple
     .group_id("orders-service")
     .build();
 
+// Health check — same connection config, so SSL/SASL is honoured here too.
+let is_healthy = test_kafka(connection).await?;
+
 // Producer
-let producer = get_kafka_producer(producer_config.clone()).await?;
+let producer = get_kafka_producer(producer_config).await?;
 producer.send_json("order-123", &serde_json::json!({ "event": "order_placed" })).await?;
 
 // Consumer — caller owns batching policy; here, up to 100 messages or every 5s
@@ -941,32 +962,26 @@ let mut batches = consumer.messages().chunks_timeout(100, Duration::from_secs(5)
 tokio::pin!(batches);
 while let Some(batch) = batches.next().await {
     let mut last_ok = None;
-    let parsed: Vec<_> = batch
-        .into_iter()
-        .filter_map(|r| match r {
+    for result in batch {
+        match result {
             Ok(msg) => {
-                last_ok = Some(msg.clone());
-                Some((msg.key, msg.value))
+                println!("key={:?}, message={}", msg.key, msg.value);
+                last_ok = Some(msg);
             }
-            Err(e) => {
-                tracing::warn!(?e, "skipping message");
-                None
+            Err(KafkaConsumeError::Decode { reason, message }) => {
+                // poison message: dead-letter it and commit past it so the
+                // group doesn't get stuck re-reading it forever
+                tracing::warn!(%reason, topic = message.topic(), offset = message.offset(), "undecodable message");
+                consumer.commit_raw(&message, CommitMode::Async)?;
             }
-        })
-        .collect();
-
-    for (key, message) in &parsed {
-        println!("key={key}, message={message}");
+            Err(KafkaConsumeError::Consumer(e)) => tracing::warn!(?e, "consumer error"),
+        }
     }
 
     if let Some(msg) = last_ok {
         consumer.commit(&msg, CommitMode::Async)?;
     }
 }
-
-// Health check — reuses the `connection` config already embedded in the
-// producer config, so there's no need to build a third config from scratch.
-let is_healthy = test_kafka(producer_config.connection).await?;
 ```
 
 Notes:
@@ -977,6 +992,28 @@ Notes:
   producer silently needing to pick just one topic out of a list meant for
   a consumer's subscriptions, and makes it a compile error to pass a
   consumer's config where a producer's is expected (or vice versa).
+- **Security.** `security_protocol` (`Plaintext` default, `Ssl`,
+  `SaslPlaintext`, `SaslSsl`), `sasl_mechanism` (`Plain`, `ScramSha256`,
+  `ScramSha512`), `sasl_username`/`sasl_password`, and
+  `ssl_ca_location`/`ssl_certificate_location`/`ssl_key_location`/
+  `ssl_key_password` map 1:1 to the librdkafka settings. When the protocol
+  is `SaslPlaintext`/`SaslSsl`, mechanism + username + password are
+  validated as required at client creation. `rdkafka` is built with the
+  `ssl-vendored` and `zstd` features, so TLS, SASL PLAIN/SCRAM and
+  zstd-compressed topics work out of the box with no system dependencies
+  beyond a C toolchain; GSSAPI/Kerberos and OAUTHBEARER/OIDC are not enabled.
+  Because OpenSSL is statically linked, librdkafka probes the standard CA
+  bundle paths at runtime (`/etc/ssl/certs/ca-certificates.crt`,
+  `/etc/ssl/cert.pem`, ...) — make sure the runtime image has
+  `ca-certificates` installed (distroless/scratch images don't), or point
+  `ssl_ca_location` at a bundle/private CA explicitly.
+- Any other librdkafka setting (`client.id`, `compression.type`, ...) can be
+  passed via `.extra_option(...)` / `.extra_options([...])`. They are
+  applied last, so they override the typed fields if both are set.
+- Missing/empty required config (`brokers`, `topic`, `topics`, `group_id`,
+  SASL fields) returns `AppError::InternalError` with a
+  `Config error [kafka/<field>]: ...` message, consistent with the other
+  connectors; broker/network failures return `AppError::DependencyFailed`.
 - `socket_timeout_ms` (default `5000`) applies to all three roles
   (producer, consumer, and `test_kafka`) via `KafkaConnectionConfig`. Note this
   is a **behavior change from librdkafka's own bare default of 60000ms** —
@@ -987,7 +1024,9 @@ Notes:
   `auto.offset.reset=earliest` by default) only when the caller explicitly
   calls `commit`, giving full control over delivery semantics and an
   at-least-once guarantee (a message is never marked done until your code
-  says so).
+  says so). `CommitMode::Async` returns immediately; `CommitMode::Sync`
+  blocks the calling thread until the broker acknowledges — in async code
+  prefer `Async`, or wrap a `Sync` commit in `tokio::task::block_in_place`.
 - Optionally, `KafkaConsumerConfigBuilder::auto_commit(true)` re-enables
   librdkafka's periodic background auto-commit (`auto_commit_interval_ms`
   controls the frequency, default `5000`). **Tradeoff:** with auto-commit
@@ -1002,19 +1041,24 @@ Notes:
   is currently in progress; this is informational only and not enforced —
   callers may check it if they want to defer committing during
   reassignment.
-- Null/empty keys and values are rejected on the producer side (`send_json`,
-  `send_json_to_topic`, and `send_bytes` all return `AppError::BadRequest`
-  for an empty key, a `null`/empty-string JSON value, or an empty byte
-  payload — nothing is sent to the broker). The consumer applies the same
-  rule defensively: any message with an empty key or a `null`/empty-string
-  value is skipped (logged as a warning) rather than yielded from
-  `messages()`, protecting against messages written by other, non-arche
-  producers into the same topic.
-- SASL/SSL and other librdkafka settings (e.g. `security.protocol`,
-  `sasl.mechanism`, `sasl.username`) are not exposed as dedicated config
-  fields — pass them via `.extra_option(...)` / `.extra_options([...])`
-  (available on all three builders), which map directly to librdkafka's
-  `key=value` client settings.
+- Empty keys and null/empty values are rejected on the producer side
+  (`send_json`, `send_json_to_topic`, `send_bytes`, and `send_bytes_to_topic`
+  return `AppError::BadRequest` for an empty key, a `null`/empty-string JSON
+  value, or an empty byte payload — nothing is sent to the broker).
+- **The consumer never drops messages.** `messages()` yields every message
+  from the subscription: successfully decoded ones as `KafkaMessage`
+  (`key: Option<String>` — `None` for Kafka null keys; `value` — a null
+  payload/tombstone decodes to `Value::Null`), and undecodable ones
+  (non-UTF-8 key, non-JSON payload) as `KafkaConsumeError::Decode { reason,
+  message }` carrying the raw message, so the caller can dead-letter it
+  and/or `commit_raw(&message, ..)` to move past it. Broker/consumer errors
+  are `KafkaConsumeError::Consumer(AppError)`. `KafkaConsumeError`
+  converts into `AppError` via `From` for `?` in handlers.
+- **Raw messages.** `KafkaConsumer::raw_messages()` yields every message
+  untouched as `KafkaRawMessage` (`key()`/`payload()` as `Option<&[u8]>`,
+  plus `topic()`/`partition()`/`offset()` and `into_inner()` for the
+  underlying `rdkafka` message). Use it for Avro/protobuf/bytes topics or
+  with `send_bytes`, and commit with `commit_raw(&msg, mode)`.
 
 ---
 
